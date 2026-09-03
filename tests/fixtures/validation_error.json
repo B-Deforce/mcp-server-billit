@@ -1,0 +1,4 @@
+{
+  "Code": "InvalidVatPercentage",
+  "Description": "The supplied VAT percentage is invalid."
+}

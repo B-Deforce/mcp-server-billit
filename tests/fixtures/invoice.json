@@ -1,0 +1,49 @@
+{
+  "OrderID": 1194146,
+  "OrderNumber": "QS-244SC",
+  "OrderType": "Invoice",
+  "OrderDirection": "Income",
+  "OrderDate": "2026-08-01T00:00:00",
+  "ExpiryDate": "2026-08-31T00:00:00",
+  "Currency": "EUR",
+  "Customer": {
+    "PartyID": 588708,
+    "Name": "Example Customer",
+    "VATNumber": "BE0123456789",
+    "Email": "accounts@example.test",
+    "Addresses": [
+      {
+        "AddressType": "InvoiceAddress",
+        "Street": "Example Street",
+        "StreetNumber": "1",
+        "Zipcode": "9000",
+        "City": "Ghent",
+        "CountryCode": "BE"
+      }
+    ]
+  },
+  "OrderLines": [
+    {
+      "Description": "Consulting",
+      "Quantity": 2,
+      "UnitPriceExcl": 100,
+      "VATPercentage": 21,
+      "TotalExcl": 200,
+      "TotalVAT": 42,
+      "TotalIncl": 242
+    }
+  ],
+  "TotalExcl": 200,
+  "TotalVAT": 42,
+  "TotalIncl": 242,
+  "ToPay": 242,
+  "Paid": false,
+  "IsSent": false,
+  "Created": "2026-08-01T10:01:02.123",
+  "LastModified": "2026-08-01T10:01:03.456",
+  "OrderPDF": {
+    "FileID": "00000000-0000-0000-0000-000000000001",
+    "FileName": "QS-244SC.pdf",
+    "MimeType": "application/pdf"
+  }
+}

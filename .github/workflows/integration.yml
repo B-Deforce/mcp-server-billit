@@ -1,0 +1,25 @@
+name: Billit sandbox integration
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  read-only-sandbox-test:
+    runs-on: ubuntu-latest
+    environment: billit-sandbox
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install -e '.[dev]'
+      - run: pytest tests/integration
+        env:
+          BILLIT_API_KEY: ${{ secrets.BILLIT_SANDBOX_API_KEY }}
+          BILLIT_PARTY_ID: ${{ secrets.BILLIT_SANDBOX_PARTY_ID }}
+          BILLIT_ENV: sandbox
+          BILLIT_TEST_INVOICE_ID: ${{ vars.BILLIT_SANDBOX_TEST_INVOICE_ID }}
