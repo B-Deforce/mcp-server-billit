@@ -25,6 +25,11 @@ class FakeClient:
         self.patch_calls = 0
         self.create_calls = 0
         self.send_calls: list[tuple[int, InvoiceDeliveryMethod]] = []
+        self.peppol_checks: list[str] = []
+        self.peppol_response: dict[str, Any] = {
+            "Registered": True,
+            "DocumentTypes": ["BISv3Invoice"],
+        }
 
     async def get_invoice_raw(self, _invoice_id: int) -> dict[str, Any]:
         return deepcopy(self.payload)
@@ -39,6 +44,27 @@ class FakeClient:
     async def list_unpaid_invoices_raw(self, *, max_results: int) -> dict[str, Any]:
         assert max_results == 10
         return {"Items": [deepcopy(self.payload)]}
+
+    async def search_customers_raw(self, customer_name: str, *, max_results: int) -> dict[str, Any]:
+        assert customer_name == "exam"
+        assert max_results == 100
+        return {
+            "Items": [
+                {"PartyID": 588708, "Name": "Éxample Customer"},
+                {"PartyID": 999, "Name": "Unrelated Company"},
+            ]
+        }
+
+    async def find_invoices_by_customer_ids_raw(
+        self, customer_ids: list[int], *, max_results: int
+    ) -> dict[str, Any]:
+        assert customer_ids == [588708]
+        assert max_results == 25
+        return {"Items": [deepcopy(self.payload)]}
+
+    async def get_peppol_participant_raw(self, identifier: str) -> dict[str, Any]:
+        self.peppol_checks.append(identifier)
+        return deepcopy(self.peppol_response)
 
     async def mark_invoice_paid(self, invoice_id: int, **_kwargs: Any) -> None:
         self.patch_calls += 1
@@ -112,13 +138,39 @@ async def test_list_unpaid_invoices_is_read_only_and_compact(
 
 
 @pytest.mark.asyncio
-async def test_list_unpaid_invoices_rejects_more_than_fifty(
+async def test_list_unpaid_invoices_accepts_one_hundred_and_rejects_more(
     invoice_payload: dict[str, Any],
 ) -> None:
-    service = BillitService(FakeClient(invoice_payload))  # type: ignore[arg-type]
+    client = FakeClient(invoice_payload)
+    service = BillitService(client)  # type: ignore[arg-type]
 
-    with pytest.raises(ValueError, match="between 1 and 50"):
-        await service.list_unpaid_invoices(max_results=51)
+    async def accept_one_hundred(*, max_results: int) -> dict[str, Any]:
+        assert max_results == 100
+        return {"Items": []}
+
+    client.list_unpaid_invoices_raw = accept_one_hundred  # type: ignore[method-assign]
+    result = await service.list_unpaid_invoices(max_results=100)
+
+    assert result.max_results == 100
+    with pytest.raises(ValueError, match="between 1 and 100"):
+        await service.list_unpaid_invoices(max_results=101)
+
+
+@pytest.mark.asyncio
+async def test_find_invoices_by_partial_customer_name_is_verified_locally(
+    invoice_payload: dict[str, Any],
+) -> None:
+    invoice_payload["CounterParty"] = {"DisplayName": "Éxample Customer"}
+    client = FakeClient(invoice_payload)
+    service = BillitService(client)  # type: ignore[arg-type]
+
+    result = await service.find_invoices_by_customer_name("  exam  ", max_results=25)
+
+    assert result.found is True
+    assert result.query == "exam"
+    assert result.matched_customer_count == 1
+    assert result.invoices[0].customer == "Éxample Customer"
+    assert client.send_calls == []
 
 
 @pytest.mark.asyncio
@@ -201,6 +253,79 @@ async def test_send_invoice_by_email_is_verified(invoice_payload: dict[str, Any]
     assert result.delivery_confirmed is True
     assert result.requested_transport is InvoiceDeliveryMethod.EMAIL
     assert client.send_calls == [(1194146, InvoiceDeliveryMethod.EMAIL)]
+    assert client.peppol_checks == []
+
+
+@pytest.mark.asyncio
+async def test_peppol_capability_check_is_read_only(invoice_payload: dict[str, Any]) -> None:
+    client = FakeClient(invoice_payload)
+    service = BillitService(client)  # type: ignore[arg-type]
+
+    result = await service.check_peppol_recipient(1194146)
+
+    assert result.registered is True
+    assert result.can_receive_invoices is True
+    assert result.checked_identifier == "BE0123456789"
+    assert client.peppol_checks == ["BE0123456789"]
+    assert client.send_calls == []
+
+
+@pytest.mark.asyncio
+async def test_peppol_send_returns_the_successful_preflight(
+    invoice_payload: dict[str, Any],
+) -> None:
+    client = FakeClient(invoice_payload)
+    service = BillitService(client)  # type: ignore[arg-type]
+
+    result = await service.send_invoice(1194146, transport=InvoiceDeliveryMethod.PEPPOL)
+
+    assert result.sent is True
+    assert result.peppol_capability is not None
+    assert result.peppol_capability.can_receive_invoices is True
+    assert client.send_calls == [(1194146, InvoiceDeliveryMethod.PEPPOL)]
+
+
+@pytest.mark.asyncio
+async def test_peppol_send_requires_invoice_capability(invoice_payload: dict[str, Any]) -> None:
+    client = FakeClient(invoice_payload)
+    client.peppol_response = {"Registered": True, "DocumentTypes": ["BISv3CreditNote"]}
+    service = BillitService(client)  # type: ignore[arg-type]
+
+    with pytest.raises(BillitSafetyError, match="invoice-capable document type"):
+        await service.send_invoice(1194146, transport=InvoiceDeliveryMethod.PEPPOL)
+
+    assert client.peppol_checks == ["BE0123456789"]
+    assert client.send_calls == []
+
+
+@pytest.mark.asyncio
+async def test_peppol_send_requires_customer_identifier(invoice_payload: dict[str, Any]) -> None:
+    invoice_payload["Customer"].pop("VATNumber")
+    client = FakeClient(invoice_payload)
+    service = BillitService(client)  # type: ignore[arg-type]
+
+    with pytest.raises(BillitSafetyError, match="no customer VAT or Peppol identifier"):
+        await service.send_invoice(1194146, transport=InvoiceDeliveryMethod.PEPPOL)
+
+    assert client.peppol_checks == []
+    assert client.send_calls == []
+
+
+@pytest.mark.asyncio
+async def test_peppol_check_uses_a_scheme_identifier_when_vat_is_missing(
+    invoice_payload: dict[str, Any],
+) -> None:
+    invoice_payload["Customer"].pop("VATNumber")
+    invoice_payload["Customer"]["Identifiers"] = [
+        {"Identifier": "5430003799999", "SchemeID": "0088"}
+    ]
+    client = FakeClient(invoice_payload)
+    service = BillitService(client)  # type: ignore[arg-type]
+
+    result = await service.check_peppol_recipient(1194146)
+
+    assert result.checked_identifier == "0088:5430003799999"
+    assert client.peppol_checks == ["0088:5430003799999"]
 
 
 @pytest.mark.asyncio

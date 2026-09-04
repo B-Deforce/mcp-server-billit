@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import unicodedata
 from datetime import datetime
 from uuid import uuid4
 
@@ -10,21 +11,25 @@ from .config import BillitEnvironment
 from .errors import BillitSafetyError, BillitVerificationError
 from .mappers import (
     create_invoice_to_billit,
+    customer_invoice_search_from_billit,
     invoice_from_billit,
     invoice_send_status_from_billit,
     payment_status_from_billit,
+    peppol_capability_from_billit,
     reference_search_from_billit,
     unpaid_invoices_from_billit,
 )
 from .models import (
     CreatedInvoice,
     CreateInvoiceInput,
+    CustomerInvoiceSearchResult,
     InvoiceDeliveryMethod,
     InvoiceReferenceSearchResult,
     InvoiceSendStatus,
     InvoiceView,
     PaymentMethod,
     PaymentStatus,
+    PeppolRecipientCapability,
     UnpaidInvoiceList,
 )
 
@@ -53,10 +58,54 @@ class BillitService:
         return reference_search_from_billit(raw)
 
     async def list_unpaid_invoices(self, *, max_results: int = 10) -> UnpaidInvoiceList:
-        if not 1 <= max_results <= 50:
-            raise ValueError("max_results must be between 1 and 50")
+        if not 1 <= max_results <= 100:
+            raise ValueError("max_results must be between 1 and 100")
         raw = await self.client.list_unpaid_invoices_raw(max_results=max_results)
         return unpaid_invoices_from_billit(raw, max_results=max_results)
+
+    async def find_invoices_by_customer_name(
+        self,
+        customer_name: str,
+        *,
+        max_results: int = 10,
+    ) -> CustomerInvoiceSearchResult:
+        query = customer_name.strip()
+        if not query:
+            raise ValueError("customer_name must not be empty")
+        if not 1 <= max_results <= 100:
+            raise ValueError("max_results must be between 1 and 100")
+
+        customer_data = await self.client.search_customers_raw(query, max_results=100)
+        normalized_query = _normalize_name(query)
+        matched_ids: list[int] = []
+        for party in _items(customer_data):
+            party_id = _party_id(party)
+            names = _party_names(party)
+            if party_id is not None and any(
+                normalized_query in _normalize_name(name) for name in names
+            ):
+                matched_ids.append(party_id)
+        matched_ids = list(dict.fromkeys(matched_ids))
+
+        invoices = await self.client.find_invoices_by_customer_ids_raw(
+            matched_ids,
+            max_results=max_results,
+        )
+        customer_results_have_more = bool(
+            customer_data.get("NextPageLink") or customer_data.get("nextPageLink")
+        )
+        return customer_invoice_search_from_billit(
+            invoices,
+            query=query,
+            matched_customer_count=len(matched_ids),
+            max_results=max_results,
+            customer_results_have_more=customer_results_have_more,
+        )
+
+    async def check_peppol_recipient(self, invoice_id: int) -> PeppolRecipientCapability:
+        current = await self.client.get_invoice_raw(invoice_id)
+        self._ensure_outgoing_sales_invoice(current, invoice_id, operation="Peppol check")
+        return await self._check_peppol_for_invoice(current, invoice_id)
 
     async def mark_invoice_paid(
         self,
@@ -130,6 +179,14 @@ class BillitService:
                     f"Invoice {invoice_id} has no customer email address; nothing was sent."
                 )
 
+        peppol_capability = None
+        if transport is InvoiceDeliveryMethod.PEPPOL:
+            peppol_capability = await self._check_peppol_for_invoice(current, invoice_id)
+            if not peppol_capability.can_receive_invoices:
+                raise BillitSafetyError(
+                    f"Invoice {invoice_id} was not sent: {peppol_capability.reason}"
+                )
+
         await self.client.send_invoice(invoice_id, transport=transport)
         updated = await self.client.get_invoice_raw(invoice_id)
         if not bool(updated.get("IsSent", False)):
@@ -141,7 +198,43 @@ class BillitService:
             updated,
             transport=transport,
             already_sent=False,
+            peppol_capability=peppol_capability,
         )
+
+    async def _check_peppol_for_invoice(
+        self,
+        invoice: dict[str, object],
+        invoice_id: int,
+    ) -> PeppolRecipientCapability:
+        customer = invoice.get("Customer")
+        if not isinstance(customer, dict):
+            customer = invoice.get("CounterParty")
+        if not isinstance(customer, dict):
+            raise BillitSafetyError(
+                f"Invoice {invoice_id} has no customer data for a Peppol capability check."
+            )
+
+        identifiers = _peppol_identifiers(customer)
+        if not identifiers:
+            raise BillitSafetyError(
+                f"Invoice {invoice_id} has no customer VAT or Peppol identifier; nothing was sent."
+            )
+        customer_name = next(iter(_party_names(customer)), None)
+        fallback: PeppolRecipientCapability | None = None
+        for identifier in identifiers:
+            raw = await self.client.get_peppol_participant_raw(identifier)
+            capability = peppol_capability_from_billit(
+                raw,
+                invoice_id=invoice_id,
+                customer=customer_name,
+                checked_identifier=identifier,
+            )
+            if capability.can_receive_invoices:
+                return capability
+            if fallback is None or capability.registered:
+                fallback = capability
+        assert fallback is not None
+        return fallback
 
     def _ensure_write_allowed(self) -> None:
         config = self.client.config
@@ -168,3 +261,54 @@ class BillitService:
                 f"Order {invoice_id} is not an outgoing sales invoice; "
                 f"no {operation} action was taken."
             )
+
+
+def _items(data: dict[str, object]) -> list[dict[str, object]]:
+    raw_items = data.get("Items") or data.get("items") or data.get("value") or []
+    if not isinstance(raw_items, list):
+        return []
+    return [item for item in raw_items if isinstance(item, dict)]
+
+
+def _party_id(party: dict[str, object]) -> int | None:
+    value = party.get("PartyID") or party.get("CustomerID")
+    try:
+        return int(str(value)) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _party_names(party: dict[str, object]) -> list[str]:
+    values = [party.get("DisplayName"), party.get("Name"), party.get("CommercialName")]
+    return [str(value).strip() for value in values if value is not None and str(value).strip()]
+
+
+def _normalize_name(value: str) -> str:
+    decomposed = unicodedata.normalize("NFKD", value.casefold())
+    return " ".join("".join(char for char in decomposed if not unicodedata.combining(char)).split())
+
+
+def _peppol_identifiers(customer: dict[str, object]) -> list[str]:
+    identifiers: list[str] = []
+    for key in ("VATNumber", "EnterpriseNumber", "CompanyNumber", "CBE"):
+        value = customer.get(key)
+        if value is not None and str(value).strip():
+            identifiers.append(str(value).strip())
+
+    raw_identifiers = customer.get("Identifiers") or []
+    if isinstance(raw_identifiers, list):
+        for item in raw_identifiers:
+            if isinstance(item, str) and item.strip():
+                identifiers.append(item.strip())
+                continue
+            if not isinstance(item, dict):
+                continue
+            value = item.get("Identifier") or item.get("Value")
+            if value is None or not str(value).strip():
+                continue
+            identifier = str(value).strip()
+            scheme = item.get("SchemeID") or item.get("Scheme")
+            if scheme is not None and str(scheme).strip() and ":" not in identifier:
+                identifier = f"{str(scheme).strip()}:{identifier}"
+            identifiers.append(identifier)
+    return list(dict.fromkeys(identifiers))

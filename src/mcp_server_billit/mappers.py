@@ -8,6 +8,7 @@ from typing import Any
 
 from .models import (
     CreateInvoiceInput,
+    CustomerInvoiceSearchResult,
     CustomerView,
     FileReference,
     InvoiceAddress,
@@ -18,6 +19,7 @@ from .models import (
     InvoiceSendStatus,
     InvoiceView,
     PaymentStatus,
+    PeppolRecipientCapability,
     UnpaidInvoiceList,
 )
 
@@ -85,11 +87,63 @@ def unpaid_invoices_from_billit(
     )
 
 
+def customer_invoice_search_from_billit(
+    data: dict[str, Any],
+    *,
+    query: str,
+    matched_customer_count: int,
+    max_results: int,
+    customer_results_have_more: bool,
+) -> CustomerInvoiceSearchResult:
+    invoices = _invoice_summaries(data)
+    next_page = data.get("NextPageLink") or data.get("nextPageLink")
+    return CustomerInvoiceSearchResult(
+        query=query,
+        found=bool(invoices),
+        matched_customer_count=matched_customer_count,
+        returned_count=len(invoices),
+        max_results=max_results,
+        has_more=customer_results_have_more or bool(next_page),
+        invoices=invoices,
+    )
+
+
+def peppol_capability_from_billit(
+    data: dict[str, Any],
+    *,
+    invoice_id: int,
+    customer: str | None,
+    checked_identifier: str,
+) -> PeppolRecipientCapability:
+    registered = _boolean(data.get("Registered"))
+    document_types = _document_types(data)
+    can_receive = registered and any(_is_invoice_document(value) for value in document_types)
+    if not registered:
+        reason = "Billit reports that this identifier is not registered on Peppol."
+    elif not can_receive:
+        reason = (
+            "The Peppol participant is registered, but Billit did not report an invoice-capable "
+            "document type."
+        )
+    else:
+        reason = "Billit reports that this Peppol participant can receive invoices."
+    return PeppolRecipientCapability(
+        invoice_id=invoice_id,
+        customer=customer,
+        checked_identifier=checked_identifier,
+        registered=registered,
+        can_receive_invoices=can_receive,
+        document_types=document_types,
+        reason=reason,
+    )
+
+
 def invoice_send_status_from_billit(
     data: dict[str, Any],
     *,
     transport: InvoiceDeliveryMethod,
     already_sent: bool,
+    peppol_capability: PeppolRecipientCapability | None = None,
 ) -> InvoiceSendStatus:
     delivery = data.get("CurrentDocumentDeliveryDetails")
     delivered = delivery.get("IsDocumentDelivered") if isinstance(delivery, dict) else None
@@ -100,6 +154,7 @@ def invoice_send_status_from_billit(
         sent=bool(data.get("IsSent", False)),
         already_sent=already_sent,
         delivery_confirmed=delivered if isinstance(delivered, bool) else None,
+        peppol_capability=peppol_capability,
     )
 
 
@@ -281,3 +336,51 @@ def _integer(value: Any) -> int | None:
 
 def _string(value: Any) -> str | None:
     return str(value) if value is not None and value != "" else None
+
+
+def _boolean(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() == "true"
+
+
+def _document_types(data: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    raw_types = data.get("DocumentTypes") or []
+    if isinstance(raw_types, str):
+        raw_types = [raw_types]
+    if isinstance(raw_types, list):
+        for item in raw_types:
+            value = _document_type_value(item)
+            if value:
+                values.append(value)
+
+    service_details = data.get("ServiceDetails") or []
+    if isinstance(service_details, dict):
+        service_details = [service_details]
+    if isinstance(service_details, list):
+        for detail in service_details:
+            if not isinstance(detail, dict):
+                continue
+            for key in ("DocumentType", "DocumentTypeIdentifier", "DocumentTypeID"):
+                value = _document_type_value(detail.get(key))
+                if value:
+                    values.append(value)
+
+    return list(dict.fromkeys(values))
+
+
+def _document_type_value(value: Any) -> str | None:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        for key in ("Name", "Identifier", "Value", "DocumentType"):
+            nested = _string(value.get(key))
+            if nested:
+                return nested
+    return None
+
+
+def _is_invoice_document(value: str) -> bool:
+    normalized = value.casefold().replace("-", "").replace("_", "")
+    return normalized.endswith("invoice") and "selfbilling" not in normalized

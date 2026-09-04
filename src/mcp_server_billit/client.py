@@ -7,6 +7,7 @@ import json
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -105,6 +106,66 @@ class BillitClient:
         value = self._json(response)
         if not isinstance(value, dict):
             raise BillitServerError("Billit returned an unexpected unpaid-invoice response shape.")
+        return value
+
+    async def search_customers_raw(
+        self,
+        customer_name: str,
+        *,
+        max_results: int = 100,
+    ) -> dict[str, Any]:
+        response = await self._get_with_retries(
+            "/v1/parties",
+            params={
+                "$filter": "PartyType eq 'Customer'",
+                "fullTextSearch": customer_name,
+                "$top": str(max_results),
+            },
+        )
+        value = self._json(response)
+        if not isinstance(value, dict):
+            raise BillitServerError("Billit returned an unexpected customer-search response shape.")
+        return value
+
+    async def find_invoices_by_customer_ids_raw(
+        self,
+        customer_ids: list[int],
+        *,
+        max_results: int = 10,
+    ) -> dict[str, Any]:
+        if not customer_ids:
+            return {"Items": []}
+        customer_filter = " or ".join(
+            f"CounterParty/PartyID eq {customer_id}" for customer_id in customer_ids
+        )
+        odata_filter = (
+            f"OrderType eq 'Invoice' and OrderDirection eq 'Income' and ({customer_filter})"
+        )
+        response = await self._get_with_retries(
+            "/v1/orders",
+            params={
+                "$filter": odata_filter,
+                "$orderby": "OrderDate desc,OrderID desc",
+                "$top": str(max_results),
+            },
+        )
+        value = self._json(response)
+        if not isinstance(value, dict):
+            raise BillitServerError(
+                "Billit returned an unexpected customer-invoice response shape."
+            )
+        return value
+
+    async def get_peppol_participant_raw(self, identifier: str) -> dict[str, Any]:
+        encoded_identifier = quote(identifier, safe="")
+        response = await self._get_with_retries(
+            f"/v1/peppol/participantInformation/{encoded_identifier}"
+        )
+        value = self._json(response)
+        if not isinstance(value, dict):
+            raise BillitServerError(
+                "Billit returned an unexpected Peppol participant response shape."
+            )
         return value
 
     async def mark_invoice_paid(

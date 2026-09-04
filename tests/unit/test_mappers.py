@@ -6,7 +6,9 @@ from typing import Any
 
 from mcp_server_billit.mappers import (
     create_invoice_to_billit,
+    customer_invoice_search_from_billit,
     invoice_from_billit,
+    peppol_capability_from_billit,
     reference_search_from_billit,
     unpaid_invoices_from_billit,
 )
@@ -138,3 +140,53 @@ def test_unpaid_invoice_mapping_returns_count_and_summaries(
     assert result.invoices[0].customer == "Example Customer"
     assert result.invoices[0].amount_remaining == Decimal("242")
     assert result.invoices[0].sent is False
+
+
+def test_customer_invoice_search_mapping_reports_counts(invoice_payload: dict[str, Any]) -> None:
+    invoice_payload["CounterParty"] = {"DisplayName": "Naos"}
+    result = customer_invoice_search_from_billit(
+        {"Items": [invoice_payload]},
+        query="nao",
+        matched_customer_count=1,
+        max_results=25,
+        customer_results_have_more=False,
+    )
+
+    assert result.query == "nao"
+    assert result.found is True
+    assert result.matched_customer_count == 1
+    assert result.returned_count == 1
+    assert result.invoices[0].customer == "Naos"
+
+
+def test_peppol_capability_requires_registration_and_invoice_document() -> None:
+    capable = peppol_capability_from_billit(
+        {
+            "Registered": True,
+            "DocumentTypes": ["BISv3Invoice", "BISv3CreditNote"],
+        },
+        invoice_id=7,
+        customer="Naos",
+        checked_identifier="BE0123456789",
+    )
+    self_billing_only = peppol_capability_from_billit(
+        {
+            "Registered": "true",
+            "ServiceDetails": [{"DocumentType": {"Identifier": "BISv3InvoiceSelfBilling"}}],
+        },
+        invoice_id=7,
+        customer="Naos",
+        checked_identifier="BE0123456789",
+    )
+    response_only = peppol_capability_from_billit(
+        {"Registered": True, "DocumentTypes": ["BISv3InvoiceResponse"]},
+        invoice_id=7,
+        customer="Naos",
+        checked_identifier="BE0123456789",
+    )
+
+    assert capable.registered is True
+    assert capable.can_receive_invoices is True
+    assert self_billing_only.registered is True
+    assert self_billing_only.can_receive_invoices is False
+    assert response_only.can_receive_invoices is False

@@ -3,18 +3,23 @@
 A small, local [Model Context Protocol](https://modelcontextprotocol.io/) server and async Python
 client for invoice work in your own Billit account.
 
-It exposes six tools:
+It exposes eight tools:
 
 - `get_invoice`: retrieve one invoice by Billit's `OrderID`
 - `find_invoices_by_payment_reference`: find outgoing invoices by an exact external/payment
   reference, such as a Shopify order number
-- `list_unpaid_invoices`: list up to 50 unpaid outgoing invoices, ordered by due date
+- `find_invoices_by_customer_name`: find outgoing invoices using a verified, case-insensitive
+  partial customer-name match
+- `list_unpaid_invoices`: list up to 100 unpaid outgoing invoices, ordered by due date
+- `check_peppol_recipient`: check whether an invoice customer is registered and supports an
+  invoice document type on Peppol
 - `mark_invoice_paid`: mark an outgoing sales invoice fully paid
 - `create_invoice`: save a basic outgoing sales invoice without sending it
-- `send_invoice`: send one existing outgoing invoice by email or Peppol
+- `send_invoice`: send one existing outgoing invoice by email or Peppol; Peppol is preflighted
 
 The server deliberately does not expose arbitrary HTTP requests, batch invoice sending, automatic
-transport fallback, Peppol account management, partial payments, or hosted transports.
+transport fallback, fuzzy customer guesses, Peppol account management, partial payments, or hosted
+transports.
 
 > [!IMPORTANT]
 > Billit's current API-key documentation limits API keys to personal, non-commercial integrations
@@ -36,8 +41,12 @@ transport fallback, Peppol account management, partial payments, or hosted trans
 - `create_invoice` sends Billit's `Idempotent-Key` header, never retries a write after an unknown
   outcome, and never calls Billit's send endpoint.
 - `send_invoice` first verifies the order is an unsent `Income` `Invoice`. Email delivery uses only
-  the customer address already stored on the invoice; Peppol delivery is strict and never falls
-  back to email.
+  the customer address already stored on the invoice. Before a Peppol send, Billit must report the
+  recipient as both registered and capable of receiving an invoice document type. Peppol delivery
+  is strict and never falls back to email.
+- Customer-name invoice searches use Billit's customer full-text search, then locally verify a
+  case-insensitive, accent-insensitive partial name match before querying orders by exact PartyID.
+  Typo-fuzzy guesses are intentionally excluded to avoid mixing similarly named customers.
 - Send commands are single-invoice operations and are never retried automatically after an unknown
   outcome. The tool reads the invoice back and tells the operator to inspect Billit before retrying
   if the sent state cannot be verified.
@@ -147,9 +156,21 @@ List unpaid outgoing invoices, with the earliest due date first:
 }
 ```
 
-`max_results` defaults to 10 and is capped at 50.
+`max_results` defaults to 10 and is capped at 100, below Billit's 120-record OData page maximum.
 The response distinguishes the number returned from `has_more`, so a capped result is not mistaken
 for the total number of unpaid invoices.
+
+Find invoices for a customer using a partial name:
+
+```json
+{
+  "customer_name": "nao",
+  "max_results": 25
+}
+```
+
+The match is case- and accent-insensitive, but not fuzzy or typo-tolerant. The response reports how
+many customer records matched and returns only invoices tied to those exact customer PartyIDs.
 
 Mark an invoice paid:
 
@@ -217,9 +238,23 @@ Or send it over Peppol:
 }
 ```
 
+You can run the same read-only Peppol capability check separately before deciding to send:
+
+```json
+{
+  "invoice_id": 1194146
+}
+```
+
+Use `check_peppol_recipient` for this call. It reads the customer VAT or Peppol identifier from the
+invoice and reports registration, supported document types, and whether regular invoices can be
+received. Billit checks the Peppol test network in sandbox and the live network in production.
+
 This is an external side effect. Review the full invoice and its recipient before approving the
 tool call. If Billit already marks the invoice as sent, the tool returns without sending it again.
 Peppol delivery uses Billit's strict transport header, so it cannot silently fall back to email.
+Registration by itself is not accepted: the participant lookup must also advertise an
+invoice-capable document type. If the check is negative or inconclusive, nothing is sent.
 
 ## Python client
 
@@ -268,10 +303,14 @@ Never run integration tests against production.
 - [Billit header values](https://docs.billit.be/docs/header-values)
 - [Billit Orders API](https://docs.billit.be/reference/order-1)
 - [Billit OData filtering](https://docs.billit.be/docs/odata)
+- [Search parties](https://docs.billit.be/reference/party_getparties-1)
 - [Retrieve one order](https://docs.billit.be/reference/order_getorders_orderid)
 - [Patch one order](https://docs.billit.be/reference/order_patchorders-1)
 - [Send existing orders](https://docs.billit.be/reference/order_postsend-1)
 - [Email and Peppol delivery behavior](https://docs.billit.be/docs/email-sending-enable-disable)
+- [Check a Peppol participant](https://docs.billit.be/reference/peppol_getparticipantinformation-1)
+- [Interpret Peppol capability checks](https://docs.billit.be/docs/check-via-api)
+- [Peppol receiving capabilities](https://docs.billit.be/docs/peppol-receiving-capabilities)
 - [Update payment information](https://docs.billit.be/docs/set-billit-payment-status-after-sending)
 - [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk)
 

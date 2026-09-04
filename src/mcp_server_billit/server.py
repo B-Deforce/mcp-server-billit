@@ -16,12 +16,14 @@ from .client import BillitClient
 from .models import (
     CreatedInvoice,
     CreateInvoiceInput,
+    CustomerInvoiceSearchResult,
     InvoiceDeliveryMethod,
     InvoiceReferenceSearchResult,
     InvoiceSendStatus,
     InvoiceView,
     PaymentMethod,
     PaymentStatus,
+    PeppolRecipientCapability,
     UnpaidInvoiceList,
 )
 from .service import BillitService
@@ -43,7 +45,8 @@ mcp = MCPServer[AppContext](
     description="Small, local tools for retrieving and updating invoices in one Billit account.",
     instructions=(
         "Use get_invoice before proposing a payment-state change or sending an invoice. "
-        "Never claim create_invoice sends an invoice: it only saves the invoice in Billit."
+        "Never claim create_invoice sends an invoice: it only saves the invoice in Billit. "
+        "Peppol sends require a successful recipient capability preflight."
     ),
     lifespan=app_lifespan,
 )
@@ -84,15 +87,46 @@ async def find_invoices_by_payment_reference(
 @mcp.tool()
 async def list_unpaid_invoices(
     ctx: Context[AppContext],
-    max_results: Annotated[int, Field(ge=1, le=50)] = 10,
+    max_results: Annotated[int, Field(ge=1, le=100)] = 10,
 ) -> UnpaidInvoiceList:
     """List unpaid outgoing sales invoices, ordered by due date.
 
-    This is read-only. Results default to 10 invoices and are capped at 50.
+    This is read-only. Results default to 10 invoices and are capped at 100.
     """
     return await ctx.request_context.lifespan_context.service.list_unpaid_invoices(
         max_results=max_results
     )
+
+
+@mcp.tool()
+async def find_invoices_by_customer_name(
+    customer_name: Annotated[str, Field(min_length=1, max_length=250)],
+    ctx: Context[AppContext],
+    max_results: Annotated[int, Field(ge=1, le=100)] = 10,
+) -> CustomerInvoiceSearchResult:
+    """Find outgoing invoices by a case-insensitive partial customer-name match.
+
+    This read-only lookup searches Billit customers first, verifies the partial name match locally,
+    then returns invoices belonging to those customer IDs. It intentionally does not make fuzzy or
+    typo-tolerant guesses that could mix invoices from similarly named customers.
+    """
+    return await ctx.request_context.lifespan_context.service.find_invoices_by_customer_name(
+        customer_name,
+        max_results=max_results,
+    )
+
+
+@mcp.tool()
+async def check_peppol_recipient(
+    invoice_id: Annotated[int, Field(gt=0)],
+    ctx: Context[AppContext],
+) -> PeppolRecipientCapability:
+    """Check whether an invoice customer can receive invoices through Peppol.
+
+    This is read-only. Registration alone is not treated as sufficient: Billit must also report an
+    invoice-capable document type for the recipient identifier stored on the invoice.
+    """
+    return await ctx.request_context.lifespan_context.service.check_peppol_recipient(invoice_id)
 
 
 @mcp.tool()
@@ -144,7 +178,8 @@ async def send_invoice(
     """Send one existing outgoing invoice by email or Peppol.
 
     This is an external side effect. Review the invoice, recipient, and transport before approving
-    the call. An invoice already marked sent is not sent again. Peppol never falls back to email.
+    the call. An invoice already marked sent is not sent again. Peppol requires a successful
+    recipient capability check and never falls back to email.
     """
     return await ctx.request_context.lifespan_context.service.send_invoice(
         invoice_id,

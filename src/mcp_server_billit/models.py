@@ -112,6 +112,16 @@ class InvoiceReferenceSearchResult(APIModel):
     matches: list[InvoiceReferenceMatch] = Field(default_factory=list)
 
 
+class CustomerInvoiceSearchResult(APIModel):
+    query: str
+    found: bool
+    matched_customer_count: int
+    returned_count: int
+    max_results: int
+    has_more: bool
+    invoices: list[InvoiceReferenceMatch] = Field(default_factory=list)
+
+
 class UnpaidInvoiceList(APIModel):
     returned_count: int
     max_results: int
@@ -134,6 +144,17 @@ class InvoiceSendStatus(APIModel):
     sent: bool
     already_sent: bool = False
     delivery_confirmed: bool | None = None
+    peppol_capability: PeppolRecipientCapability | None = None
+
+
+class PeppolRecipientCapability(APIModel):
+    invoice_id: int
+    customer: str | None = None
+    checked_identifier: str
+    registered: bool
+    can_receive_invoices: bool
+    document_types: list[str] = Field(default_factory=list)
+    reason: str
 
 
 class CreateInvoiceLine(APIModel):
