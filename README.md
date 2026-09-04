@@ -3,6 +3,23 @@
 A small, local [Model Context Protocol](https://modelcontextprotocol.io/) server and async Python
 client for invoice work in your own Billit account.
 
+## Best used with a local MCP client
+
+Billit MCP works best when it runs locally on the same computer as an MCP-capable assistant. A
+local client can start this server as a private stdio process, so you do not need to host the
+server or expose your Billit credentials over the internet. Good fits include the ChatGPT desktop
+app, the Codex app and CLI, Claude Desktop, Claude Code, and other clients that support local stdio
+MCP servers.
+
+Codex clients share MCP configuration, so a server configured in `~/.codex/config.toml` can be
+used from the desktop app, CLI, and IDE extension. See the [Codex MCP documentation](https://learn.chatgpt.com/docs/extend/mcp)
+and [Claude Code MCP documentation](https://docs.anthropic.com/en/docs/claude-code/mcp) for
+client-specific setup.
+
+ChatGPT on the web does not read your local stdio configuration. It connects to remote MCP servers;
+use [Secure MCP Tunnel](https://help.openai.com/en/articles/12584461) if you specifically need to
+bridge a locally running server to a supported ChatGPT workspace.
+
 It exposes eight tools:
 
 - `get_invoice`: retrieve one invoice by Billit's `OrderID`
@@ -77,7 +94,22 @@ For development tools:
 
 ## Configure
 
-Set these in the environment of the process that starts the MCP server:
+### 1. Get your Billit credentials
+
+In MyBillit, find the PartyID for the company you want to manage and create or copy your personal
+API key. Billit's [PartyID and API key guide](https://docs.billit.be/docs/partyid-and-key) shows
+where to find both values.
+
+- Treat the API key like a password. Do not paste it into chat, issues, source files, screenshots,
+  or committed configuration.
+- Sandbox and production have different PartyIDs. Use the PartyID belonging to the environment you
+  select.
+- If your Billit user can access multiple companies, select the PartyID for the specific company
+  whose invoices the MCP should access.
+
+### 2. Configure the server environment
+
+Set these values in the environment of the process that starts the MCP server:
 
 ```dotenv
 BILLIT_API_KEY=your-secret-api-key
@@ -87,6 +119,9 @@ BILLIT_ENV=sandbox
 
 Do not commit a populated `.env` file. The server does not load `.env` automatically; configure
 the environment through your MCP host or a secret manager.
+
+Use `BILLIT_ENV=production` with your production PartyID. Production reads then work normally, but
+write tools remain disabled until you deliberately set `BILLIT_ALLOW_PRODUCTION_WRITES=true`.
 
 For a typical MCP client configuration:
 
@@ -107,6 +142,15 @@ For a typical MCP client configuration:
 
 Use your client's secure secret/configuration mechanism where one is available instead of storing
 the API key in a plain-text configuration file.
+
+### 3. Restart and test read-only first
+
+Restart or refresh the MCP client after changing its configuration. Begin with a read-only tool
+such as `list_unpaid_invoices`, `find_invoices_by_customer_name`, or `get_invoice`. Only enable
+production writes after confirming that the returned company and invoice data are correct.
+
+Repository-aware coding agents can also read [AGENTS.md](AGENTS.md) for the project architecture,
+safety rules, development commands, and a credential-safe installation checklist.
 
 ## Run
 
