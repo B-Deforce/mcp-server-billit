@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from .models import (
+    CreatedCreditNote,
     CreateInvoiceInput,
+    CreditNoteSendStatus,
+    CreditNoteStatus,
     CustomerInvoiceSearchResult,
     CustomerView,
     FileReference,
@@ -19,6 +22,7 @@ from .models import (
     InvoiceSendStatus,
     InvoiceView,
     PaymentStatus,
+    PeppolDocumentType,
     PeppolRecipientCapability,
     UnpaidInvoiceList,
 )
@@ -114,25 +118,42 @@ def peppol_capability_from_billit(
     invoice_id: int,
     customer: str | None,
     checked_identifier: str,
+    required_document_type: PeppolDocumentType = PeppolDocumentType.INVOICE,
 ) -> PeppolRecipientCapability:
     registered = _boolean(data.get("Registered"))
     document_types = _document_types(data)
-    can_receive = registered and any(_is_invoice_document(value) for value in document_types)
+    can_receive_invoices = registered and any(
+        _is_invoice_document(value) for value in document_types
+    )
+    can_receive_credit_notes = registered and any(
+        _is_credit_note_document(value) for value in document_types
+    )
+    can_receive_required_document = {
+        PeppolDocumentType.INVOICE: can_receive_invoices,
+        PeppolDocumentType.CREDIT_NOTE: can_receive_credit_notes,
+    }[required_document_type]
     if not registered:
         reason = "Billit reports that this identifier is not registered on Peppol."
-    elif not can_receive:
+    elif not can_receive_required_document:
+        label = "invoice" if required_document_type is PeppolDocumentType.INVOICE else "credit-note"
         reason = (
-            "The Peppol participant is registered, but Billit did not report an invoice-capable "
+            f"The Peppol participant is registered, but Billit did not report a {label}-capable "
             "document type."
         )
     else:
-        reason = "Billit reports that this Peppol participant can receive invoices."
+        label = (
+            "invoices" if required_document_type is PeppolDocumentType.INVOICE else "credit notes"
+        )
+        reason = f"Billit reports that this Peppol participant can receive {label}."
     return PeppolRecipientCapability(
         invoice_id=invoice_id,
         customer=customer,
         checked_identifier=checked_identifier,
         registered=registered,
-        can_receive_invoices=can_receive,
+        required_document_type=required_document_type,
+        can_receive_required_document=can_receive_required_document,
+        can_receive_invoices=can_receive_invoices,
+        can_receive_credit_notes=can_receive_credit_notes,
         document_types=document_types,
         reason=reason,
     )
@@ -150,6 +171,105 @@ def invoice_send_status_from_billit(
     return InvoiceSendStatus(
         invoice_id=int(data["OrderID"]),
         invoice_number=_string(data.get("OrderNumber")),
+        requested_transport=transport,
+        sent=bool(data.get("IsSent", False)),
+        already_sent=already_sent,
+        delivery_confirmed=delivered if isinstance(delivered, bool) else None,
+        peppol_capability=peppol_capability,
+    )
+
+
+def credit_note_from_invoice_to_billit(
+    invoice: dict[str, Any],
+    *,
+    credit_note_number: str,
+    issue_date: date,
+    due_date: date | None,
+    reason: str | None,
+) -> dict[str, Any]:
+    invoice_number = _string(invoice.get("OrderNumber"))
+    customer = invoice.get("Customer")
+    if not isinstance(customer, dict):
+        customer = invoice.get("CounterParty")
+    customer_id = _integer(invoice.get("CustomerID"))
+    if customer_id is None and isinstance(customer, dict):
+        customer_id = _integer(customer.get("PartyID") or customer.get("CustomerID"))
+    lines = invoice.get("OrderLines") or invoice.get("Orderlines") or []
+
+    if not invoice_number:
+        raise ValueError("The source invoice has no OrderNumber.")
+    if customer_id is None:
+        raise ValueError("The source invoice has no reusable customer PartyID.")
+    if not isinstance(lines, list) or not lines:
+        raise ValueError("The source invoice has no order lines to credit.")
+
+    mapped_lines = [_credit_note_line(line) for line in lines if isinstance(line, dict)]
+    if len(mapped_lines) != len(lines):
+        raise ValueError("The source invoice contains an unsupported order-line value.")
+
+    payload: dict[str, Any] = {
+        "OrderType": "CreditNote",
+        "OrderDirection": "Income",
+        "OrderNumber": credit_note_number,
+        "OrderDate": issue_date.isoformat(),
+        "ExpiryDate": (due_date or issue_date).isoformat(),
+        "CustomerID": customer_id,
+        "OrderLines": mapped_lines,
+        "Currency": _string(invoice.get("Currency")) or "EUR",
+        "AboutInvoiceNumber": invoice_number,
+    }
+    if reason:
+        payload["Comments"] = reason
+    return payload
+
+
+def credit_note_status_from_billit(
+    data: dict[str, Any],
+    *,
+    already_paid: bool = False,
+    already_sent: bool = False,
+) -> CreditNoteStatus:
+    return CreditNoteStatus(
+        credit_note_id=int(data["OrderID"]),
+        credit_note_number=_string(data.get("OrderNumber")),
+        source_invoice_number=_string(data.get("AboutInvoiceNumber")),
+        paid=bool(data.get("Paid", False)),
+        paid_at=_datetime(data.get("PaidDate")),
+        sent=bool(data.get("IsSent", False)),
+        already_paid=already_paid,
+        already_sent=already_sent,
+    )
+
+
+def created_credit_note_from_billit(
+    data: dict[str, Any],
+    *,
+    source_invoice_id: int,
+    idempotency_key: str,
+) -> CreatedCreditNote:
+    status = credit_note_status_from_billit(data)
+    return CreatedCreditNote(
+        **status.model_dump(),
+        source_invoice_id=source_invoice_id,
+        total=_decimal(data.get("TotalIncl")),
+        currency=_string(data.get("Currency")),
+        idempotency_key=idempotency_key,
+    )
+
+
+def credit_note_send_status_from_billit(
+    data: dict[str, Any],
+    *,
+    transport: InvoiceDeliveryMethod,
+    already_sent: bool,
+    peppol_capability: PeppolRecipientCapability | None = None,
+) -> CreditNoteSendStatus:
+    delivery = data.get("CurrentDocumentDeliveryDetails")
+    delivered = delivery.get("IsDocumentDelivered") if isinstance(delivery, dict) else None
+    return CreditNoteSendStatus(
+        credit_note_id=int(data["OrderID"]),
+        credit_note_number=_string(data.get("OrderNumber")),
+        source_invoice_number=_string(data.get("AboutInvoiceNumber")),
         requested_transport=transport,
         sent=bool(data.get("IsSent", False)),
         already_sent=already_sent,
@@ -290,6 +410,34 @@ def _line(data: dict[str, Any]) -> InvoiceLineView:
     )
 
 
+def _credit_note_line(data: dict[str, Any]) -> dict[str, Any]:
+    required = ("Quantity", "UnitPriceExcl", "Description", "VATPercentage")
+    if any(data.get(key) is None for key in required):
+        raise ValueError("A source invoice line is missing credit-note fields.")
+    quantity = _decimal(data.get("Quantity"))
+    unit_price = _decimal(data.get("UnitPriceExcl"))
+    if quantity is None or unit_price is None or quantity < 0 or unit_price < 0:
+        raise ValueError("Negative or invalid source invoice lines cannot be credited safely.")
+
+    mapped = {key: data[key] for key in required}
+    optional = (
+        "Code",
+        "Reference",
+        "DescriptionExtended",
+        "VentilationCode",
+        "ProductID",
+        "Unit",
+        "CustomFields",
+        "AnalyticCostBearer",
+        "AnalyticCostCenter",
+        "ReductionPercentage",
+        "AllowanceChargeIndicator",
+        "ExternalSequence",
+    )
+    mapped.update({key: data[key] for key in optional if data.get(key) is not None})
+    return mapped
+
+
 def _file_reference(data: dict[str, Any]) -> FileReference:
     return FileReference(
         file_id=_string(data.get("FileID")),
@@ -384,3 +532,8 @@ def _document_type_value(value: Any) -> str | None:
 def _is_invoice_document(value: str) -> bool:
     normalized = value.casefold().replace("-", "").replace("_", "")
     return normalized.endswith("invoice") and "selfbilling" not in normalized
+
+
+def _is_credit_note_document(value: str) -> bool:
+    normalized = value.casefold().replace("-", "").replace("_", "")
+    return normalized.endswith("creditnote") and "selfbilling" not in normalized

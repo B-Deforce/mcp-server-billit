@@ -24,14 +24,18 @@ class FakeClient:
         self.config = config or BillitConfig(api_key="key", party_id=1)
         self.patch_calls = 0
         self.create_calls = 0
+        self.created_payload: dict[str, Any] | None = None
+        self.credit_note_payload: dict[str, Any] | None = None
         self.send_calls: list[tuple[int, InvoiceDeliveryMethod]] = []
         self.peppol_checks: list[str] = []
         self.peppol_response: dict[str, Any] = {
             "Registered": True,
-            "DocumentTypes": ["BISv3Invoice"],
+            "DocumentTypes": ["BISv3Invoice", "BISv3CreditNote"],
         }
 
-    async def get_invoice_raw(self, _invoice_id: int) -> dict[str, Any]:
+    async def get_invoice_raw(self, invoice_id: int) -> dict[str, Any]:
+        if invoice_id == 654 and self.credit_note_payload is not None:
+            return deepcopy(self.credit_note_payload)
         return deepcopy(self.payload)
 
     async def find_invoices_by_payment_reference_raw(
@@ -68,15 +72,37 @@ class FakeClient:
 
     async def mark_invoice_paid(self, invoice_id: int, **_kwargs: Any) -> None:
         self.patch_calls += 1
-        assert invoice_id == int(self.payload["OrderID"])
-        self.payload["Paid"] = True
-        self.payload["PaidDate"] = "2026-09-03T12:30:00"
+        target = self.credit_note_payload if invoice_id == 654 else self.payload
+        assert target is not None
+        assert invoice_id == int(target["OrderID"])
+        target["Paid"] = True
+        target["PaidDate"] = "2026-09-03T12:30:00"
+
+    async def mark_order_sent(self, order_id: int) -> None:
+        self.patch_calls += 1
+        target = self.credit_note_payload if order_id == 654 else self.payload
+        assert target is not None
+        target["IsSent"] = True
 
     async def create_invoice_raw(self, payload: dict[str, Any], *, idempotency_key: str) -> int:
         self.create_calls += 1
         assert payload["OrderType"] == "Invoice"
         assert idempotency_key
         return 987
+
+    async def create_credit_note_raw(self, payload: dict[str, Any], *, idempotency_key: str) -> int:
+        self.create_calls += 1
+        self.created_payload = deepcopy(payload)
+        assert idempotency_key
+        self.credit_note_payload = {
+            **deepcopy(payload),
+            "OrderID": 654,
+            "Customer": deepcopy(self.payload["Customer"]),
+            "TotalIncl": self.payload["TotalIncl"],
+            "Paid": False,
+            "IsSent": False,
+        }
+        return 654
 
     async def send_invoice(
         self,
@@ -87,6 +113,17 @@ class FakeClient:
         self.send_calls.append((invoice_id, transport))
         self.payload["IsSent"] = True
         self.payload["CurrentDocumentDeliveryDetails"] = {"IsDocumentDelivered": True}
+
+    async def send_credit_note(
+        self,
+        credit_note_id: int,
+        *,
+        transport: InvoiceDeliveryMethod,
+    ) -> None:
+        assert self.credit_note_payload is not None
+        self.send_calls.append((credit_note_id, transport))
+        self.credit_note_payload["IsSent"] = True
+        self.credit_note_payload["CurrentDocumentDeliveryDetails"] = {"IsDocumentDelivered": True}
 
 
 @pytest.mark.asyncio
@@ -239,6 +276,186 @@ async def test_create_invoice_does_not_send(invoice_payload: dict[str, Any]) -> 
     assert created.sent is False
     assert created.idempotency_key == "stable-attempt"
     assert client.create_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_create_credit_note_derives_full_credit_without_sending(
+    invoice_payload: dict[str, Any],
+) -> None:
+    invoice_payload["PaymentReference"] = "do-not-copy"
+    invoice_payload["OrderPDF"] = {"FileID": "do-not-copy"}
+    invoice_payload["Attachments"] = [{"FileID": "do-not-copy"}]
+    client = FakeClient(invoice_payload)
+    service = BillitService(client)  # type: ignore[arg-type]
+
+    result = await service.create_credit_note_from_invoice(
+        1194146,
+        credit_note_number="CN-2026-001",
+        issue_date=date(2026, 9, 4),
+        reason="Full cancellation",
+        idempotency_key="credit-qs244sc-1",
+    )
+
+    assert result.credit_note_id == 654
+    assert result.source_invoice_id == 1194146
+    assert result.source_invoice_number == "QS-244SC"
+    assert result.credit_note_number == "CN-2026-001"
+    assert result.total == Decimal("242")
+    assert result.sent is False
+    assert client.created_payload == {
+        "OrderType": "CreditNote",
+        "OrderDirection": "Income",
+        "OrderNumber": "CN-2026-001",
+        "OrderDate": "2026-09-04",
+        "ExpiryDate": "2026-09-04",
+        "CustomerID": 588708,
+        "OrderLines": [
+            {
+                "Description": "Consulting",
+                "Quantity": 2,
+                "UnitPriceExcl": 100,
+                "VATPercentage": 21,
+            }
+        ],
+        "Currency": "EUR",
+        "AboutInvoiceNumber": "QS-244SC",
+        "Comments": "Full cancellation",
+    }
+    assert client.send_calls == []
+
+
+@pytest.mark.asyncio
+async def test_create_credit_note_rejects_non_invoice_source(
+    invoice_payload: dict[str, Any],
+) -> None:
+    invoice_payload["OrderType"] = "CreditNote"
+    client = FakeClient(invoice_payload)
+    service = BillitService(client)  # type: ignore[arg-type]
+
+    with pytest.raises(BillitSafetyError, match="not an outgoing sales invoice"):
+        await service.create_credit_note_from_invoice(
+            1194146,
+            credit_note_number="CN-2026-001",
+            issue_date=date(2026, 9, 4),
+        )
+
+    assert client.create_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_create_credit_note_rejects_unsafe_negative_source_line(
+    invoice_payload: dict[str, Any],
+) -> None:
+    invoice_payload["OrderLines"][0]["Quantity"] = -1
+    client = FakeClient(invoice_payload)
+    service = BillitService(client)  # type: ignore[arg-type]
+
+    with pytest.raises(BillitSafetyError, match="cannot be converted safely"):
+        await service.create_credit_note_from_invoice(
+            1194146,
+            credit_note_number="CN-2026-001",
+            issue_date=date(2026, 9, 4),
+        )
+
+    assert client.create_calls == 0
+
+
+async def _create_credit_note_for_test(
+    service: BillitService,
+) -> None:
+    await service.create_credit_note_from_invoice(
+        1194146,
+        credit_note_number="CN-2026-001",
+        issue_date=date(2026, 9, 4),
+        idempotency_key="credit-qs244sc-1",
+    )
+
+
+@pytest.mark.asyncio
+async def test_mark_credit_note_paid_is_verified(invoice_payload: dict[str, Any]) -> None:
+    client = FakeClient(invoice_payload)
+    service = BillitService(client)  # type: ignore[arg-type]
+    await _create_credit_note_for_test(service)
+
+    result = await service.mark_credit_note_paid(
+        654,
+        paid_at=datetime(2026, 9, 4, 12, 30),
+    )
+
+    assert result.paid is True
+    assert result.already_paid is False
+    assert client.patch_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_mark_credit_note_sent_only_updates_status(
+    invoice_payload: dict[str, Any],
+) -> None:
+    client = FakeClient(invoice_payload)
+    service = BillitService(client)  # type: ignore[arg-type]
+    await _create_credit_note_for_test(service)
+
+    result = await service.mark_credit_note_sent(654)
+
+    assert result.sent is True
+    assert result.already_sent is False
+    assert client.patch_calls == 1
+    assert client.send_calls == []
+
+
+@pytest.mark.asyncio
+async def test_send_credit_note_by_email_is_verified(invoice_payload: dict[str, Any]) -> None:
+    client = FakeClient(invoice_payload)
+    service = BillitService(client)  # type: ignore[arg-type]
+    await _create_credit_note_for_test(service)
+
+    result = await service.send_credit_note(654, transport=InvoiceDeliveryMethod.EMAIL)
+
+    assert result.sent is True
+    assert result.delivery_confirmed is True
+    assert result.source_invoice_number == "QS-244SC"
+    assert client.send_calls == [(654, InvoiceDeliveryMethod.EMAIL)]
+
+
+@pytest.mark.asyncio
+async def test_credit_note_peppol_send_requires_credit_note_capability(
+    invoice_payload: dict[str, Any],
+) -> None:
+    client = FakeClient(invoice_payload)
+    client.peppol_response = {"Registered": True, "DocumentTypes": ["BISv3Invoice"]}
+    service = BillitService(client)  # type: ignore[arg-type]
+    await _create_credit_note_for_test(service)
+
+    with pytest.raises(BillitSafetyError, match="credit-note-capable document type"):
+        await service.send_credit_note(654, transport=InvoiceDeliveryMethod.PEPPOL)
+
+    assert client.peppol_checks == ["BE0123456789"]
+    assert client.send_calls == []
+
+
+@pytest.mark.asyncio
+async def test_production_credit_note_create_requires_second_opt_in(
+    invoice_payload: dict[str, Any],
+) -> None:
+    client = FakeClient(
+        invoice_payload,
+        config=BillitConfig(
+            api_key="key",
+            party_id=1,
+            environment=BillitEnvironment.PRODUCTION,
+            allow_production_writes=False,
+        ),
+    )
+    service = BillitService(client)  # type: ignore[arg-type]
+
+    with pytest.raises(BillitSafetyError, match="Production writes are disabled"):
+        await service.create_credit_note_from_invoice(
+            1194146,
+            credit_note_number="CN-2026-001",
+            issue_date=date(2026, 9, 4),
+        )
+
+    assert client.create_calls == 0
 
 
 @pytest.mark.asyncio

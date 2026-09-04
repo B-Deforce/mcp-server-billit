@@ -74,10 +74,14 @@ or dumping an MCP configuration file when they could expose credentials.
 - Production mutations require the explicit second opt-in.
 - GET requests may retry transient failures; writes must not retry an unknown outcome.
 - `create_invoice` saves but does not send.
-- Payment and delivery mutations apply only to outgoing `Income` invoices and are verified by a
-  read after write.
-- Peppol delivery requires a successful participant and invoice-document capability preflight and
-  must never fall back to email.
+- `create_credit_note_from_invoice` creates only a full credit from an outgoing `Income` invoice,
+  preserves positive amounts, links `AboutInvoiceNumber`, and verifies the new order after creation.
+  It requires an explicit credit-note number and does not consume a Billit sequence.
+- Payment and delivery mutations apply only to the expected outgoing `Income` invoice or credit
+  note type and are verified by a read after write.
+- `mark_credit_note_sent` changes status only and must never call the send endpoint.
+- Peppol delivery requires a successful participant and document-specific capability preflight;
+  an invoice capability does not authorize a credit-note send. It must never fall back to email.
 - Customer-name search must resolve verified customer PartyIDs before retrieving invoices. Do not
   introduce automatic fuzzy matching that can mix similarly named customers.
 - Keep default tool responses compact and make privacy-heavy raw data opt-in.

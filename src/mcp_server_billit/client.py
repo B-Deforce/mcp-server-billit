@@ -192,16 +192,49 @@ class BillitClient:
             json_body=payload,
         )
 
+    async def mark_order_sent(self, order_id: int) -> None:
+        await self._write(
+            "PATCH",
+            f"/v1/orders/{order_id}",
+            operation="mark-sent",
+            json_body={"IsSent": True},
+        )
+
     async def create_invoice_raw(
         self,
         payload: dict[str, Any],
         *,
         idempotency_key: str,
     ) -> int:
+        return await self._create_order_raw(
+            payload,
+            operation="create-invoice",
+            idempotency_key=idempotency_key,
+        )
+
+    async def create_credit_note_raw(
+        self,
+        payload: dict[str, Any],
+        *,
+        idempotency_key: str,
+    ) -> int:
+        return await self._create_order_raw(
+            payload,
+            operation="create-credit-note",
+            idempotency_key=idempotency_key,
+        )
+
+    async def _create_order_raw(
+        self,
+        payload: dict[str, Any],
+        *,
+        operation: str,
+        idempotency_key: str,
+    ) -> int:
         response = await self._write(
             "POST",
             "/v1/orders",
-            operation="create-invoice",
+            operation=operation,
             json_body=payload,
             headers={"Idempotent-Key": idempotency_key},
             idempotency_key=idempotency_key,
@@ -213,7 +246,7 @@ class BillitClient:
             return int(value)
         except (TypeError, ValueError):
             raise BillitServerError(
-                "Billit returned an unexpected create-invoice response."
+                f"Billit returned an unexpected {operation} response."
             ) from None
 
     async def send_invoice(
@@ -221,6 +254,31 @@ class BillitClient:
         invoice_id: int,
         *,
         transport: InvoiceDeliveryMethod,
+    ) -> None:
+        await self._send_order(
+            invoice_id,
+            transport=transport,
+            operation=f"send-invoice-{transport.value}",
+        )
+
+    async def send_credit_note(
+        self,
+        credit_note_id: int,
+        *,
+        transport: InvoiceDeliveryMethod,
+    ) -> None:
+        await self._send_order(
+            credit_note_id,
+            transport=transport,
+            operation=f"send-credit-note-{transport.value}",
+        )
+
+    async def _send_order(
+        self,
+        order_id: int,
+        *,
+        transport: InvoiceDeliveryMethod,
+        operation: str,
     ) -> None:
         billit_transport = {
             InvoiceDeliveryMethod.EMAIL: "SMTP",
@@ -232,8 +290,8 @@ class BillitClient:
         await self._write(
             "POST",
             "/v1/orders/commands/send",
-            operation=f"send-invoice-{transport.value}",
-            json_body={"Transporttype": billit_transport, "OrderIDs": [invoice_id]},
+            operation=operation,
+            json_body={"Transporttype": billit_transport, "OrderIDs": [order_id]},
             headers=headers,
         )
 

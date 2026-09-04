@@ -192,6 +192,30 @@ async def test_create_sends_idempotency_key_and_never_retries() -> None:
 
 
 @pytest.mark.asyncio
+async def test_create_credit_note_posts_order_with_idempotency_key() -> None:
+    payload = {
+        "OrderType": "CreditNote",
+        "OrderDirection": "Income",
+        "AboutInvoiceNumber": "INV-1",
+    }
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/v1/orders"
+        assert request.headers["Idempotent-Key"] == "credit-attempt-1"
+        assert json.loads(request.content) == payload
+        return httpx.Response(200, json=654)
+
+    async with BillitClient(config(), transport=httpx.MockTransport(handler)) as client:
+        order_id = await client.create_credit_note_raw(
+            payload,
+            idempotency_key="credit-attempt-1",
+        )
+
+    assert order_id == 654
+
+
+@pytest.mark.asyncio
 async def test_mark_paid_serializes_datetime_and_method() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         body = request.content.decode()
@@ -203,6 +227,18 @@ async def test_mark_paid_serializes_datetime_and_method() -> None:
 
     async with BillitClient(config(), transport=httpx.MockTransport(handler)) as client:
         await client.mark_invoice_paid(7, paid_at=datetime(2026, 9, 3, 12, 30))
+
+
+@pytest.mark.asyncio
+async def test_mark_order_sent_only_patches_is_sent() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "PATCH"
+        assert request.url.path == "/v1/orders/7"
+        assert json.loads(request.content) == {"IsSent": True}
+        return httpx.Response(200)
+
+    async with BillitClient(config(), transport=httpx.MockTransport(handler)) as client:
+        await client.mark_order_sent(7)
 
 
 @pytest.mark.asyncio
@@ -230,6 +266,22 @@ async def test_send_invoice_uses_explicit_transport(
 
     async with BillitClient(config(), transport=httpx.MockTransport(handler)) as client:
         await client.send_invoice(7, transport=transport)
+
+
+@pytest.mark.asyncio
+async def test_send_credit_note_uses_strict_peppol_transport() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/v1/orders/commands/send"
+        assert request.headers["StrictTransportType"] == "true"
+        assert json.loads(request.content) == {
+            "Transporttype": "Peppol",
+            "OrderIDs": [654],
+        }
+        return httpx.Response(200)
+
+    async with BillitClient(config(), transport=httpx.MockTransport(handler)) as client:
+        await client.send_credit_note(654, transport=InvoiceDeliveryMethod.PEPPOL)
 
 
 @pytest.mark.asyncio

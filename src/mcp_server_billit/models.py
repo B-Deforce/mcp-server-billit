@@ -30,6 +30,11 @@ class InvoiceDeliveryMethod(StrEnum):
     PEPPOL = "peppol"
 
 
+class PeppolDocumentType(StrEnum):
+    INVOICE = "invoice"
+    CREDIT_NOTE = "credit_note"
+
+
 class InvoiceAddress(APIModel):
     name: str | None = None
     street: str | None = None
@@ -137,6 +142,19 @@ class PaymentStatus(APIModel):
     already_paid: bool = False
 
 
+class PeppolRecipientCapability(APIModel):
+    invoice_id: int
+    customer: str | None = None
+    checked_identifier: str
+    registered: bool
+    required_document_type: PeppolDocumentType
+    can_receive_required_document: bool
+    can_receive_invoices: bool
+    can_receive_credit_notes: bool
+    document_types: list[str] = Field(default_factory=list)
+    reason: str
+
+
 class InvoiceSendStatus(APIModel):
     invoice_id: int
     invoice_number: str | None = None
@@ -147,14 +165,33 @@ class InvoiceSendStatus(APIModel):
     peppol_capability: PeppolRecipientCapability | None = None
 
 
-class PeppolRecipientCapability(APIModel):
-    invoice_id: int
-    customer: str | None = None
-    checked_identifier: str
-    registered: bool
-    can_receive_invoices: bool
-    document_types: list[str] = Field(default_factory=list)
-    reason: str
+class CreditNoteStatus(APIModel):
+    credit_note_id: int
+    credit_note_number: str | None = None
+    source_invoice_number: str | None = None
+    paid: bool
+    paid_at: datetime | None = None
+    sent: bool
+    already_paid: bool = False
+    already_sent: bool = False
+
+
+class CreatedCreditNote(CreditNoteStatus):
+    source_invoice_id: int
+    total: Decimal | None = None
+    currency: str | None = None
+    idempotency_key: str
+
+
+class CreditNoteSendStatus(APIModel):
+    credit_note_id: int
+    credit_note_number: str | None = None
+    source_invoice_number: str | None = None
+    requested_transport: InvoiceDeliveryMethod
+    sent: bool
+    already_sent: bool = False
+    delivery_confirmed: bool | None = None
+    peppol_capability: PeppolRecipientCapability | None = None
 
 
 class CreateInvoiceLine(APIModel):

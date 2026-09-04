@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import unicodedata
-from datetime import datetime
+from datetime import date, datetime
 from uuid import uuid4
 
 from .client import BillitClient
@@ -11,6 +11,10 @@ from .config import BillitEnvironment
 from .errors import BillitSafetyError, BillitVerificationError
 from .mappers import (
     create_invoice_to_billit,
+    created_credit_note_from_billit,
+    credit_note_from_invoice_to_billit,
+    credit_note_send_status_from_billit,
+    credit_note_status_from_billit,
     customer_invoice_search_from_billit,
     invoice_from_billit,
     invoice_send_status_from_billit,
@@ -20,8 +24,11 @@ from .mappers import (
     unpaid_invoices_from_billit,
 )
 from .models import (
+    CreatedCreditNote,
     CreatedInvoice,
     CreateInvoiceInput,
+    CreditNoteSendStatus,
+    CreditNoteStatus,
     CustomerInvoiceSearchResult,
     InvoiceDeliveryMethod,
     InvoiceReferenceSearchResult,
@@ -29,6 +36,7 @@ from .models import (
     InvoiceView,
     PaymentMethod,
     PaymentStatus,
+    PeppolDocumentType,
     PeppolRecipientCapability,
     UnpaidInvoiceList,
 )
@@ -105,7 +113,11 @@ class BillitService:
     async def check_peppol_recipient(self, invoice_id: int) -> PeppolRecipientCapability:
         current = await self.client.get_invoice_raw(invoice_id)
         self._ensure_outgoing_sales_invoice(current, invoice_id, operation="Peppol check")
-        return await self._check_peppol_for_invoice(current, invoice_id)
+        return await self._check_peppol_for_order(
+            current,
+            invoice_id,
+            required_document_type=PeppolDocumentType.INVOICE,
+        )
 
     async def mark_invoice_paid(
         self,
@@ -154,6 +166,148 @@ class BillitService:
             sent=False,
         )
 
+    async def create_credit_note_from_invoice(
+        self,
+        invoice_id: int,
+        *,
+        credit_note_number: str,
+        issue_date: date,
+        due_date: date | None = None,
+        reason: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> CreatedCreditNote:
+        self._ensure_write_allowed()
+        number = credit_note_number.strip()
+        if not number:
+            raise ValueError("credit_note_number must not be empty")
+        if due_date is not None and due_date < issue_date:
+            raise ValueError("due_date must be on or after issue_date")
+
+        source = await self.client.get_invoice_raw(invoice_id)
+        self._ensure_outgoing_sales_invoice(source, invoice_id, operation="credit-note creation")
+        key = idempotency_key or str(uuid4())
+        try:
+            payload = credit_note_from_invoice_to_billit(
+                source,
+                credit_note_number=number,
+                issue_date=issue_date,
+                due_date=due_date,
+                reason=reason.strip() if reason and reason.strip() else None,
+            )
+        except ValueError as error:
+            raise BillitSafetyError(
+                f"Invoice {invoice_id} cannot be converted safely: {error} Nothing was created."
+            ) from error
+
+        credit_note_id = await self.client.create_credit_note_raw(
+            payload,
+            idempotency_key=key,
+        )
+        created = await self.client.get_invoice_raw(credit_note_id)
+        self._ensure_outgoing_credit_note(created, credit_note_id, operation="verification")
+        if str(created.get("OrderNumber", "")) != number or str(
+            created.get("AboutInvoiceNumber", "")
+        ) != str(source.get("OrderNumber", "")):
+            raise BillitVerificationError(
+                f"Billit created order {credit_note_id}, but its credit-note number or source "
+                "invoice link could not be verified. Inspect Billit before retrying."
+            )
+        return created_credit_note_from_billit(
+            created,
+            source_invoice_id=invoice_id,
+            idempotency_key=key,
+        )
+
+    async def mark_credit_note_paid(
+        self,
+        credit_note_id: int,
+        *,
+        paid_at: datetime,
+        note: str | None = None,
+        payment_method: PaymentMethod | None = None,
+    ) -> CreditNoteStatus:
+        self._ensure_write_allowed()
+        current = await self.client.get_invoice_raw(credit_note_id)
+        self._ensure_outgoing_credit_note(current, credit_note_id, operation="payment")
+        if bool(current.get("Paid", False)):
+            return credit_note_status_from_billit(current, already_paid=True)
+
+        await self.client.mark_invoice_paid(
+            credit_note_id,
+            paid_at=paid_at,
+            internal_info=note,
+            payment_method=payment_method,
+        )
+        updated = await self.client.get_invoice_raw(credit_note_id)
+        if not bool(updated.get("Paid", False)):
+            raise BillitVerificationError(
+                f"Billit accepted the update for credit note {credit_note_id}, but Paid=true "
+                "was not visible during verification. Check Billit before retrying."
+            )
+        return credit_note_status_from_billit(updated)
+
+    async def mark_credit_note_sent(self, credit_note_id: int) -> CreditNoteStatus:
+        self._ensure_write_allowed()
+        current = await self.client.get_invoice_raw(credit_note_id)
+        self._ensure_outgoing_credit_note(current, credit_note_id, operation="sent-status update")
+        if bool(current.get("IsSent", False)):
+            return credit_note_status_from_billit(current, already_sent=True)
+
+        await self.client.mark_order_sent(credit_note_id)
+        updated = await self.client.get_invoice_raw(credit_note_id)
+        if not bool(updated.get("IsSent", False)):
+            raise BillitVerificationError(
+                f"Billit accepted the update for credit note {credit_note_id}, but IsSent=true "
+                "was not visible during verification. Check Billit before retrying."
+            )
+        return credit_note_status_from_billit(updated)
+
+    async def send_credit_note(
+        self,
+        credit_note_id: int,
+        *,
+        transport: InvoiceDeliveryMethod,
+    ) -> CreditNoteSendStatus:
+        self._ensure_write_allowed()
+        current = await self.client.get_invoice_raw(credit_note_id)
+        self._ensure_outgoing_credit_note(current, credit_note_id, operation="delivery")
+
+        if bool(current.get("IsSent", False)):
+            return credit_note_send_status_from_billit(
+                current,
+                transport=transport,
+                already_sent=True,
+            )
+
+        if transport is InvoiceDeliveryMethod.EMAIL:
+            self._ensure_customer_email(current, credit_note_id, label="Credit note")
+
+        peppol_capability = None
+        if transport is InvoiceDeliveryMethod.PEPPOL:
+            peppol_capability = await self._check_peppol_for_order(
+                current,
+                credit_note_id,
+                required_document_type=PeppolDocumentType.CREDIT_NOTE,
+            )
+            if not peppol_capability.can_receive_required_document:
+                raise BillitSafetyError(
+                    f"Credit note {credit_note_id} was not sent: {peppol_capability.reason}"
+                )
+
+        await self.client.send_credit_note(credit_note_id, transport=transport)
+        updated = await self.client.get_invoice_raw(credit_note_id)
+        if not bool(updated.get("IsSent", False)):
+            raise BillitVerificationError(
+                f"Billit accepted the send command for credit note {credit_note_id}, but "
+                "IsSent=true was not visible during verification. Check Billit before retrying."
+            )
+        return credit_note_send_status_from_billit(
+            updated,
+            transport=transport,
+            already_sent=False,
+            peppol_capability=peppol_capability,
+        )
+
     async def send_invoice(
         self,
         invoice_id: int,
@@ -172,17 +326,16 @@ class BillitService:
             )
 
         if transport is InvoiceDeliveryMethod.EMAIL:
-            customer = current.get("Customer")
-            email = customer.get("Email") if isinstance(customer, dict) else None
-            if not isinstance(email, str) or not email.strip():
-                raise BillitSafetyError(
-                    f"Invoice {invoice_id} has no customer email address; nothing was sent."
-                )
+            self._ensure_customer_email(current, invoice_id, label="Invoice")
 
         peppol_capability = None
         if transport is InvoiceDeliveryMethod.PEPPOL:
-            peppol_capability = await self._check_peppol_for_invoice(current, invoice_id)
-            if not peppol_capability.can_receive_invoices:
+            peppol_capability = await self._check_peppol_for_order(
+                current,
+                invoice_id,
+                required_document_type=PeppolDocumentType.INVOICE,
+            )
+            if not peppol_capability.can_receive_required_document:
                 raise BillitSafetyError(
                     f"Invoice {invoice_id} was not sent: {peppol_capability.reason}"
                 )
@@ -201,23 +354,25 @@ class BillitService:
             peppol_capability=peppol_capability,
         )
 
-    async def _check_peppol_for_invoice(
+    async def _check_peppol_for_order(
         self,
-        invoice: dict[str, object],
-        invoice_id: int,
+        order: dict[str, object],
+        order_id: int,
+        *,
+        required_document_type: PeppolDocumentType,
     ) -> PeppolRecipientCapability:
-        customer = invoice.get("Customer")
+        customer = order.get("Customer")
         if not isinstance(customer, dict):
-            customer = invoice.get("CounterParty")
+            customer = order.get("CounterParty")
         if not isinstance(customer, dict):
             raise BillitSafetyError(
-                f"Invoice {invoice_id} has no customer data for a Peppol capability check."
+                f"Order {order_id} has no customer data for a Peppol capability check."
             )
 
         identifiers = _peppol_identifiers(customer)
         if not identifiers:
             raise BillitSafetyError(
-                f"Invoice {invoice_id} has no customer VAT or Peppol identifier; nothing was sent."
+                f"Order {order_id} has no customer VAT or Peppol identifier; nothing was sent."
             )
         customer_name = next(iter(_party_names(customer)), None)
         fallback: PeppolRecipientCapability | None = None
@@ -225,11 +380,12 @@ class BillitService:
             raw = await self.client.get_peppol_participant_raw(identifier)
             capability = peppol_capability_from_billit(
                 raw,
-                invoice_id=invoice_id,
+                invoice_id=order_id,
                 customer=customer_name,
                 checked_identifier=identifier,
+                required_document_type=required_document_type,
             )
-            if capability.can_receive_invoices:
+            if capability.can_receive_required_document:
                 return capability
             if fallback is None or capability.registered:
                 fallback = capability
@@ -260,6 +416,37 @@ class BillitService:
             raise BillitSafetyError(
                 f"Order {invoice_id} is not an outgoing sales invoice; "
                 f"no {operation} action was taken."
+            )
+
+    @staticmethod
+    def _ensure_outgoing_credit_note(
+        order: dict[str, object],
+        order_id: int,
+        *,
+        operation: str,
+    ) -> None:
+        order_type = str(order.get("OrderType", "")).lower()
+        order_direction = str(order.get("OrderDirection", "")).lower()
+        if order_type != "creditnote" or order_direction != "income":
+            raise BillitSafetyError(
+                f"Order {order_id} is not an outgoing sales credit note; "
+                f"no {operation} action was taken."
+            )
+
+    @staticmethod
+    def _ensure_customer_email(
+        order: dict[str, object],
+        order_id: int,
+        *,
+        label: str,
+    ) -> None:
+        customer = order.get("Customer")
+        if not isinstance(customer, dict):
+            customer = order.get("CounterParty")
+        email = customer.get("Email") if isinstance(customer, dict) else None
+        if not isinstance(email, str) or not email.strip():
+            raise BillitSafetyError(
+                f"{label} {order_id} has no customer email address; nothing was sent."
             )
 
 

@@ -20,7 +20,7 @@ ChatGPT on the web does not read your local stdio configuration. It connects to 
 use [Secure MCP Tunnel](https://help.openai.com/en/articles/12584461) if you specifically need to
 bridge a locally running server to a supported ChatGPT workspace.
 
-It exposes eight tools:
+It exposes twelve tools:
 
 - `get_invoice`: retrieve one invoice by Billit's `OrderID`
 - `find_invoices_by_payment_reference`: find outgoing invoices by an exact external/payment
@@ -33,6 +33,12 @@ It exposes eight tools:
 - `mark_invoice_paid`: mark an outgoing sales invoice fully paid
 - `create_invoice`: save a basic outgoing sales invoice without sending it
 - `send_invoice`: send one existing outgoing invoice by email or Peppol; Peppol is preflighted
+- `create_credit_note_from_invoice`: derive and save a full credit note from an existing outgoing
+  sales invoice without sending it
+- `mark_credit_note_paid`: mark an existing outgoing sales credit note paid
+- `mark_credit_note_sent`: update a credit note's sent status without delivering it
+- `send_credit_note`: send an existing credit note by email or Peppol; Peppol credit-note support
+  is preflighted
 
 The server deliberately does not expose arbitrary HTTP requests, batch invoice sending, automatic
 transport fallback, fuzzy customer guesses, Peppol account management, partial payments, or hosted
@@ -57,6 +63,16 @@ transports.
   it is already paid, and reads it back after the patch.
 - `create_invoice` sends Billit's `Idempotent-Key` header, never retries a write after an unknown
   outcome, and never calls Billit's send endpoint.
+- `create_credit_note_from_invoice` accepts only an outgoing sales invoice, derives a full credit
+  with positive line amounts, links it through `AboutInvoiceNumber`, sends an idempotency key, and
+  verifies the created credit note by reading it back. It does not copy the source payment
+  reference, PDF, or attachments, and it does not send the result.
+- Credit-note numbering is explicit. The tool does not consume Billit's number sequence, avoiding
+  a hidden second write and unexplained sequence gaps after failed creation attempts.
+- `mark_credit_note_sent` only patches `IsSent=true`; it does not transmit the document. Once
+  marked sent, `send_credit_note` will not deliver it later, which prevents accidental duplicates.
+- Credit-note Peppol sends require Billit to report a credit-note-capable document type; invoice
+  capability alone is not enough.
 - `send_invoice` first verifies the order is an unsent `Income` `Invoice`. Email delivery uses only
   the customer address already stored on the invoice. Before a Peppol send, Billit must report the
   recipient as both registered and capable of receiving an invoice document type. Peppol delivery
@@ -264,6 +280,51 @@ Create—but do not send—a basic invoice:
 country, network, or tax situation and will return a typed validation error when it rejects a
 payload.
 
+Create—but do not send—a full credit note from an existing invoice:
+
+```json
+{
+  "invoice_id": 1194146,
+  "credit_note_number": "CN-2026-001",
+  "issue_date": "2026-09-04",
+  "reason": "Invoice cancelled in full",
+  "idempotency_key": "credit-invoice-1194146-attempt-1"
+}
+```
+
+The source must be an outgoing (`Income`) invoice. The tool reuses its customer PartyID, currency,
+and complete positive invoice lines and sets `AboutInvoiceNumber` to the source invoice number.
+This is deliberately a full-credit operation; partial credit notes and free-form credit-note
+creation are not exposed. `due_date` is optional and defaults to `issue_date` because Billit
+requires an expiry date.
+
+Billit documents a special accounting behavior for linked credit notes: when
+`AboutInvoiceNumber` is present, the generated UBL represents the amount as fully prepaid with
+zero payable, regardless of the credit note's `Paid` status. `mark_credit_note_paid` still updates
+Billit's administrative status, but it does not change that UBL behavior.
+
+Mark a saved credit note as sent without transmitting it:
+
+```json
+{
+  "credit_note_id": 654
+}
+```
+
+Use `mark_credit_note_sent` for that status-only operation. To actually deliver the document, use
+`send_credit_note` instead:
+
+```json
+{
+  "credit_note_id": 654,
+  "transport": "peppol"
+}
+```
+
+Email delivery requires an email address on the saved credit note. Peppol delivery first checks
+the recipient's identifiers and requires explicit credit-note document support. It uses strict
+transport and never falls back to email.
+
 Send an existing invoice by email:
 
 ```json
@@ -350,6 +411,9 @@ Never run integration tests against production.
 - [Search parties](https://docs.billit.be/reference/party_getparties-1)
 - [Retrieve one order](https://docs.billit.be/reference/order_getorders_orderid)
 - [Patch one order](https://docs.billit.be/reference/order_patchorders-1)
+- [Create an order](https://docs.billit.be/reference/order_postorders-1)
+- [Create and send a credit note](https://docs.billit.be/docs/sending-a-credit-note)
+- [Retrieve the next number sequence](https://docs.billit.be/docs/how-can-i-retrieve-the-next-sequence)
 - [Send existing orders](https://docs.billit.be/reference/order_postsend-1)
 - [Email and Peppol delivery behavior](https://docs.billit.be/docs/email-sending-enable-disable)
 - [Check a Peppol participant](https://docs.billit.be/reference/peppol_getparticipantinformation-1)

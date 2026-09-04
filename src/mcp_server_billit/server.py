@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from typing import Annotated
 
 from mcp.server import MCPServer
@@ -14,8 +14,11 @@ from pydantic import Field
 
 from .client import BillitClient
 from .models import (
+    CreatedCreditNote,
     CreatedInvoice,
     CreateInvoiceInput,
+    CreditNoteSendStatus,
+    CreditNoteStatus,
     CustomerInvoiceSearchResult,
     InvoiceDeliveryMethod,
     InvoiceReferenceSearchResult,
@@ -44,9 +47,10 @@ mcp = MCPServer[AppContext](
     "Billit Personal",
     description="Small, local tools for retrieving and updating invoices in one Billit account.",
     instructions=(
-        "Use get_invoice before proposing a payment-state change or sending an invoice. "
+        "Use get_invoice before proposing a payment-state change, delivery, or credit note. "
         "Never claim create_invoice sends an invoice: it only saves the invoice in Billit. "
-        "Peppol sends require a successful recipient capability preflight."
+        "Creating a credit note saves a full credit derived from an invoice but does not send it. "
+        "Peppol sends require a successful document-specific recipient capability preflight."
     ),
     lifespan=app_lifespan,
 )
@@ -166,6 +170,90 @@ async def create_invoice(
     """
     return await ctx.request_context.lifespan_context.service.create_invoice(
         invoice, idempotency_key=idempotency_key
+    )
+
+
+@mcp.tool()
+async def create_credit_note_from_invoice(
+    invoice_id: Annotated[int, Field(gt=0)],
+    credit_note_number: Annotated[str, Field(min_length=1, max_length=100)],
+    issue_date: date,
+    ctx: Context[AppContext],
+    due_date: date | None = None,
+    reason: Annotated[str | None, Field(max_length=1000)] = None,
+    idempotency_key: Annotated[
+        str | None,
+        Field(min_length=8, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$"),
+    ] = None,
+) -> CreatedCreditNote:
+    """Create and save a full credit note derived from an existing sales invoice.
+
+    This changes Billit data but does not send the credit note. The customer, currency, and full
+    positive line data are copied from the source invoice, which is linked through
+    AboutInvoiceNumber. Supply a deliberate credit-note number: this tool does not consume Billit's
+    sequence. The due date defaults to the issue date. Reuse the same idempotency key only when
+    safely repeating the same attempt.
+    """
+    return await ctx.request_context.lifespan_context.service.create_credit_note_from_invoice(
+        invoice_id,
+        credit_note_number=credit_note_number,
+        issue_date=issue_date,
+        due_date=due_date,
+        reason=reason,
+        idempotency_key=idempotency_key,
+    )
+
+
+@mcp.tool()
+async def mark_credit_note_paid(
+    credit_note_id: Annotated[int, Field(gt=0)],
+    paid_at: datetime,
+    ctx: Context[AppContext],
+    note: Annotated[str | None, Field(max_length=1000)] = None,
+    payment_method: PaymentMethod | None = None,
+) -> CreditNoteStatus:
+    """Mark an existing outgoing sales credit note paid in Billit.
+
+    This changes Billit data. Supply the actual accounting payment date/time and review the credit
+    note before approving the call. Already-paid credit notes are left unchanged.
+    """
+    return await ctx.request_context.lifespan_context.service.mark_credit_note_paid(
+        credit_note_id,
+        paid_at=paid_at,
+        note=note,
+        payment_method=payment_method,
+    )
+
+
+@mcp.tool()
+async def mark_credit_note_sent(
+    credit_note_id: Annotated[int, Field(gt=0)],
+    ctx: Context[AppContext],
+) -> CreditNoteStatus:
+    """Mark an existing outgoing sales credit note sent without delivering it.
+
+    This only sets Billit's IsSent status. It does not email the customer or transmit anything over
+    Peppol. A credit note marked sent will not later be sent by send_credit_note, which protects
+    against accidental duplicate delivery.
+    """
+    return await ctx.request_context.lifespan_context.service.mark_credit_note_sent(credit_note_id)
+
+
+@mcp.tool()
+async def send_credit_note(
+    credit_note_id: Annotated[int, Field(gt=0)],
+    transport: InvoiceDeliveryMethod,
+    ctx: Context[AppContext],
+) -> CreditNoteSendStatus:
+    """Send one existing outgoing sales credit note by email or Peppol.
+
+    This is an external side effect. Review the credit note, recipient, and transport before
+    approving the call. A credit note already marked sent is not sent again. Peppol requires a
+    successful credit-note-specific recipient capability check and never falls back to email.
+    """
+    return await ctx.request_context.lifespan_context.service.send_credit_note(
+        credit_note_id,
+        transport=transport,
     )
 
 

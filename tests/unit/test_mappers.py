@@ -4,8 +4,12 @@ from datetime import date
 from decimal import Decimal
 from typing import Any
 
+import pytest
+
 from mcp_server_billit.mappers import (
     create_invoice_to_billit,
+    credit_note_from_invoice_to_billit,
+    credit_note_status_from_billit,
     customer_invoice_search_from_billit,
     invoice_from_billit,
     peppol_capability_from_billit,
@@ -17,6 +21,7 @@ from mcp_server_billit.models import (
     CreateInvoiceAddress,
     CreateInvoiceInput,
     CreateInvoiceLine,
+    PeppolDocumentType,
 )
 
 
@@ -187,6 +192,83 @@ def test_peppol_capability_requires_registration_and_invoice_document() -> None:
 
     assert capable.registered is True
     assert capable.can_receive_invoices is True
+    assert capable.can_receive_credit_notes is True
+    assert capable.can_receive_required_document is True
     assert self_billing_only.registered is True
     assert self_billing_only.can_receive_invoices is False
     assert response_only.can_receive_invoices is False
+
+
+def test_peppol_capability_can_require_credit_notes() -> None:
+    invoice_only = peppol_capability_from_billit(
+        {"Registered": True, "DocumentTypes": ["BISv3Invoice"]},
+        invoice_id=7,
+        customer="Naos",
+        checked_identifier="BE0123456789",
+        required_document_type=PeppolDocumentType.CREDIT_NOTE,
+    )
+
+    assert invoice_only.can_receive_invoices is True
+    assert invoice_only.can_receive_credit_notes is False
+    assert invoice_only.can_receive_required_document is False
+    assert "credit-note-capable" in invoice_only.reason
+
+
+def test_credit_note_mapping_derives_positive_full_credit(
+    invoice_payload: dict[str, Any],
+) -> None:
+    invoice_payload["PaymentReference"] = "not-copied"
+    invoice_payload["OrderPDF"] = {"FileID": "not-copied"}
+
+    payload = credit_note_from_invoice_to_billit(
+        invoice_payload,
+        credit_note_number="CN-2026-001",
+        issue_date=date(2026, 9, 4),
+        due_date=None,
+        reason=None,
+    )
+
+    assert payload["OrderType"] == "CreditNote"
+    assert payload["OrderDirection"] == "Income"
+    assert payload["AboutInvoiceNumber"] == "QS-244SC"
+    assert payload["CustomerID"] == 588708
+    assert payload["ExpiryDate"] == "2026-09-04"
+    assert payload["OrderLines"][0] == {
+        "Description": "Consulting",
+        "Quantity": 2,
+        "UnitPriceExcl": 100,
+        "VATPercentage": 21,
+    }
+    assert "PaymentReference" not in payload
+    assert "OrderPDF" not in payload
+
+
+def test_credit_note_mapping_rejects_negative_lines(invoice_payload: dict[str, Any]) -> None:
+    invoice_payload["OrderLines"][0]["UnitPriceExcl"] = -100
+
+    with pytest.raises(ValueError, match="Negative or invalid"):
+        credit_note_from_invoice_to_billit(
+            invoice_payload,
+            credit_note_number="CN-2026-001",
+            issue_date=date(2026, 9, 4),
+            due_date=None,
+            reason=None,
+        )
+
+
+def test_credit_note_status_includes_source_link() -> None:
+    status = credit_note_status_from_billit(
+        {
+            "OrderID": 654,
+            "OrderNumber": "CN-2026-001",
+            "AboutInvoiceNumber": "QS-244SC",
+            "Paid": True,
+            "PaidDate": "2026-09-04T12:30:00",
+            "IsSent": False,
+        }
+    )
+
+    assert status.credit_note_id == 654
+    assert status.source_invoice_number == "QS-244SC"
+    assert status.paid is True
+    assert status.sent is False
