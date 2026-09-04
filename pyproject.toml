@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcp-server-billit"
-version = "0.1.0"
+version = "0.2.0"
 description = "A small, local MCP server and async Python client for Billit invoices"
 readme = "README.md"
 requires-python = ">=3.11"

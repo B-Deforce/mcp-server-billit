@@ -3,16 +3,18 @@
 A small, local [Model Context Protocol](https://modelcontextprotocol.io/) server and async Python
 client for invoice work in your own Billit account.
 
-It exposes four tools:
+It exposes six tools:
 
 - `get_invoice`: retrieve one invoice by Billit's `OrderID`
 - `find_invoices_by_payment_reference`: find outgoing invoices by an exact external/payment
   reference, such as a Shopify order number
+- `list_unpaid_invoices`: list up to 50 unpaid outgoing invoices, ordered by due date
 - `mark_invoice_paid`: mark an outgoing sales invoice fully paid
 - `create_invoice`: save a basic outgoing sales invoice without sending it
+- `send_invoice`: send one existing outgoing invoice by email or Peppol
 
-The server deliberately does not expose arbitrary HTTP requests, invoice sending, Peppol account
-management, partial payments, or hosted transports.
+The server deliberately does not expose arbitrary HTTP requests, batch invoice sending, automatic
+transport fallback, Peppol account management, partial payments, or hosted transports.
 
 > [!IMPORTANT]
 > Billit's current API-key documentation limits API keys to personal, non-commercial integrations
@@ -33,6 +35,12 @@ management, partial payments, or hosted transports.
   it is already paid, and reads it back after the patch.
 - `create_invoice` sends Billit's `Idempotent-Key` header, never retries a write after an unknown
   outcome, and never calls Billit's send endpoint.
+- `send_invoice` first verifies the order is an unsent `Income` `Invoice`. Email delivery uses only
+  the customer address already stored on the invoice; Peppol delivery is strict and never falls
+  back to email.
+- Send commands are single-invoice operations and are never retried automatically after an unknown
+  outcome. The tool reads the invoice back and tells the operator to inspect Billit before retrying
+  if the sent state cannot be verified.
 - Raw invoice data is opt-in because it may add unnecessary personal data to model context.
 
 ## Requirements
@@ -131,6 +139,18 @@ Find invoices whose `PaymentReference` contains an external order identifier:
 The search is exact and restricted internally to outgoing invoices
 (`OrderType=Invoice`, `OrderDirection=Income`). It can return zero, one, or multiple matches.
 
+List unpaid outgoing invoices, with the earliest due date first:
+
+```json
+{
+  "max_results": 10
+}
+```
+
+`max_results` defaults to 10 and is capped at 50.
+The response distinguishes the number returned from `has_more`, so a capped result is not mistaken
+for the total number of unpaid invoices.
+
 Mark an invoice paid:
 
 ```json
@@ -179,6 +199,28 @@ Create—but do not send—a basic invoice:
 country, network, or tax situation and will return a typed validation error when it rejects a
 payload.
 
+Send an existing invoice by email:
+
+```json
+{
+  "invoice_id": 1194146,
+  "transport": "email"
+}
+```
+
+Or send it over Peppol:
+
+```json
+{
+  "invoice_id": 1194146,
+  "transport": "peppol"
+}
+```
+
+This is an external side effect. Review the full invoice and its recipient before approving the
+tool call. If Billit already marks the invoice as sent, the tool returns without sending it again.
+Peppol delivery uses Billit's strict transport header, so it cannot silently fall back to email.
+
 ## Python client
 
 The HTTP layer is independently usable:
@@ -225,8 +267,11 @@ Never run integration tests against production.
 - [Billit PartyID and API key](https://docs.billit.be/docs/partyid-and-key)
 - [Billit header values](https://docs.billit.be/docs/header-values)
 - [Billit Orders API](https://docs.billit.be/reference/order-1)
+- [Billit OData filtering](https://docs.billit.be/docs/odata)
 - [Retrieve one order](https://docs.billit.be/reference/order_getorders_orderid)
 - [Patch one order](https://docs.billit.be/reference/order_patchorders-1)
+- [Send existing orders](https://docs.billit.be/reference/order_postsend-1)
+- [Email and Peppol delivery behavior](https://docs.billit.be/docs/email-sending-enable-disable)
 - [Update payment information](https://docs.billit.be/docs/set-billit-payment-status-after-sending)
 - [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk)
 

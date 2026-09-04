@@ -5,4 +5,4 @@ from .config import BillitConfig, BillitEnvironment
 from .errors import BillitError
 
 __all__ = ["BillitClient", "BillitConfig", "BillitEnvironment", "BillitError"]
-__version__ = "0.1.0"
+__version__ = "0.2.0"

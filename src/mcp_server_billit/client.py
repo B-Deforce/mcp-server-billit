@@ -21,7 +21,7 @@ from .errors import (
     BillitTransportError,
     BillitValidationError,
 )
-from .models import PaymentMethod
+from .models import InvoiceDeliveryMethod, PaymentMethod
 
 Sleep = Callable[[float], Awaitable[None]]
 
@@ -92,6 +92,21 @@ class BillitClient:
             raise BillitServerError("Billit returned an unexpected invoice-search response shape.")
         return value
 
+    async def list_unpaid_invoices_raw(self, *, max_results: int = 10) -> dict[str, Any]:
+        odata_filter = "OrderType eq 'Invoice' and OrderDirection eq 'Income' and Paid eq false"
+        response = await self._get_with_retries(
+            "/v1/orders",
+            params={
+                "$filter": odata_filter,
+                "$orderby": "ExpiryDate asc,OrderID asc",
+                "$top": str(max_results),
+            },
+        )
+        value = self._json(response)
+        if not isinstance(value, dict):
+            raise BillitServerError("Billit returned an unexpected unpaid-invoice response shape.")
+        return value
+
     async def mark_invoice_paid(
         self,
         invoice_id: int,
@@ -139,6 +154,27 @@ class BillitClient:
             raise BillitServerError(
                 "Billit returned an unexpected create-invoice response."
             ) from None
+
+    async def send_invoice(
+        self,
+        invoice_id: int,
+        *,
+        transport: InvoiceDeliveryMethod,
+    ) -> None:
+        billit_transport = {
+            InvoiceDeliveryMethod.EMAIL: "SMTP",
+            InvoiceDeliveryMethod.PEPPOL: "Peppol",
+        }[transport]
+        headers = (
+            {"StrictTransportType": "true"} if transport is InvoiceDeliveryMethod.PEPPOL else None
+        )
+        await self._write(
+            "POST",
+            "/v1/orders/commands/send",
+            operation=f"send-invoice-{transport.value}",
+            json_body={"Transporttype": billit_transport, "OrderIDs": [invoice_id]},
+            headers=headers,
+        )
 
     async def _get_with_retries(
         self,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Any
 
@@ -9,6 +10,7 @@ import pytest
 from mcp_server_billit.client import BillitClient
 from mcp_server_billit.config import BillitConfig
 from mcp_server_billit.errors import BillitAmbiguousWriteError, BillitValidationError
+from mcp_server_billit.models import InvoiceDeliveryMethod
 
 
 def config(**overrides: Any) -> BillitConfig:
@@ -77,6 +79,23 @@ async def test_payment_reference_search_uses_safe_fixed_odata_filter() -> None:
 
 
 @pytest.mark.asyncio
+async def test_unpaid_search_uses_fixed_filter_sort_and_limit() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/orders"
+        assert request.url.params["$filter"] == (
+            "OrderType eq 'Invoice' and OrderDirection eq 'Income' and Paid eq false"
+        )
+        assert request.url.params["$orderby"] == "ExpiryDate asc,OrderID asc"
+        assert request.url.params["$top"] == "50"
+        return httpx.Response(200, json={"Items": []})
+
+    async with BillitClient(config(), transport=httpx.MockTransport(handler)) as client:
+        result = await client.list_unpaid_invoices_raw(max_results=50)
+
+    assert result == {"Items": []}
+
+
+@pytest.mark.asyncio
 async def test_validation_error_is_typed_and_secret_safe(
     validation_error_payload: dict[str, Any],
 ) -> None:
@@ -128,3 +147,48 @@ async def test_mark_paid_serializes_datetime_and_method() -> None:
 
     async with BillitClient(config(), transport=httpx.MockTransport(handler)) as client:
         await client.mark_invoice_paid(7, paid_at=datetime(2026, 9, 3, 12, 30))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("transport", "billit_transport", "strict_transport"),
+    [
+        (InvoiceDeliveryMethod.EMAIL, "SMTP", None),
+        (InvoiceDeliveryMethod.PEPPOL, "Peppol", "true"),
+    ],
+)
+async def test_send_invoice_uses_explicit_transport(
+    transport: InvoiceDeliveryMethod,
+    billit_transport: str,
+    strict_transport: str | None,
+) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/v1/orders/commands/send"
+        assert json.loads(request.content) == {
+            "Transporttype": billit_transport,
+            "OrderIDs": [7],
+        }
+        assert request.headers.get("StrictTransportType") == strict_transport
+        return httpx.Response(200)
+
+    async with BillitClient(config(), transport=httpx.MockTransport(handler)) as client:
+        await client.send_invoice(7, transport=transport)
+
+
+@pytest.mark.asyncio
+async def test_send_invoice_never_retries_an_unknown_outcome() -> None:
+    calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        raise httpx.ReadTimeout("unknown outcome", request=request)
+
+    async with BillitClient(
+        config(get_retries=5), transport=httpx.MockTransport(handler)
+    ) as client:
+        with pytest.raises(BillitAmbiguousWriteError, match="Check Billit"):
+            await client.send_invoice(7, transport=InvoiceDeliveryMethod.EMAIL)
+
+    assert calls == 1

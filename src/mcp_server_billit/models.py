@@ -25,6 +25,11 @@ class PaymentMethod(StrEnum):
     PRIVATE_ACCOUNT = "PrivateAccount"
 
 
+class InvoiceDeliveryMethod(StrEnum):
+    EMAIL = "email"
+    PEPPOL = "peppol"
+
+
 class InvoiceAddress(APIModel):
     name: str | None = None
     street: str | None = None
@@ -90,10 +95,14 @@ class InvoiceReferenceMatch(APIModel):
     payment_reference: str | None = None
     customer: str | None = None
     invoice_number: str | None = None
+    issue_date: datetime | None = None
+    due_date: datetime | None = None
     paid: bool = False
+    sent: bool = False
     amount_remaining: Decimal | None = None
     billit_status: str | None = None
     overdue: bool = False
+    days_overdue: int | None = None
     total: Decimal | None = None
     currency: str | None = None
 
@@ -103,12 +112,28 @@ class InvoiceReferenceSearchResult(APIModel):
     matches: list[InvoiceReferenceMatch] = Field(default_factory=list)
 
 
+class UnpaidInvoiceList(APIModel):
+    returned_count: int
+    max_results: int
+    has_more: bool
+    invoices: list[InvoiceReferenceMatch] = Field(default_factory=list)
+
+
 class PaymentStatus(APIModel):
     invoice_id: int
     paid: bool
     paid_at: datetime | None = None
     payment_method: str | None = None
     already_paid: bool = False
+
+
+class InvoiceSendStatus(APIModel):
+    invoice_id: int
+    invoice_number: str | None = None
+    requested_transport: InvoiceDeliveryMethod
+    sent: bool
+    already_sent: bool = False
+    delivery_confirmed: bool | None = None
 
 
 class CreateInvoiceLine(APIModel):

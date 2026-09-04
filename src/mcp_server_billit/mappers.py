@@ -11,11 +11,14 @@ from .models import (
     CustomerView,
     FileReference,
     InvoiceAddress,
+    InvoiceDeliveryMethod,
     InvoiceLineView,
     InvoiceReferenceMatch,
     InvoiceReferenceSearchResult,
+    InvoiceSendStatus,
     InvoiceView,
     PaymentStatus,
+    UnpaidInvoiceList,
 )
 
 
@@ -63,6 +66,44 @@ def payment_status_from_billit(data: dict[str, Any], *, already_paid: bool) -> P
 
 
 def reference_search_from_billit(data: dict[str, Any]) -> InvoiceReferenceSearchResult:
+    matches = _invoice_summaries(data)
+    return InvoiceReferenceSearchResult(found=bool(matches), matches=matches)
+
+
+def unpaid_invoices_from_billit(
+    data: dict[str, Any],
+    *,
+    max_results: int,
+) -> UnpaidInvoiceList:
+    invoices = _invoice_summaries(data)
+    next_page = data.get("NextPageLink") or data.get("nextPageLink")
+    return UnpaidInvoiceList(
+        returned_count=len(invoices),
+        max_results=max_results,
+        has_more=bool(next_page),
+        invoices=invoices,
+    )
+
+
+def invoice_send_status_from_billit(
+    data: dict[str, Any],
+    *,
+    transport: InvoiceDeliveryMethod,
+    already_sent: bool,
+) -> InvoiceSendStatus:
+    delivery = data.get("CurrentDocumentDeliveryDetails")
+    delivered = delivery.get("IsDocumentDelivered") if isinstance(delivery, dict) else None
+    return InvoiceSendStatus(
+        invoice_id=int(data["OrderID"]),
+        invoice_number=_string(data.get("OrderNumber")),
+        requested_transport=transport,
+        sent=bool(data.get("IsSent", False)),
+        already_sent=already_sent,
+        delivery_confirmed=delivered if isinstance(delivered, bool) else None,
+    )
+
+
+def _invoice_summaries(data: dict[str, Any]) -> list[InvoiceReferenceMatch]:
     items = data.get("Items") or data.get("items") or data.get("value") or []
     matches: list[InvoiceReferenceMatch] = []
     for item in items:
@@ -77,15 +118,19 @@ def reference_search_from_billit(data: dict[str, Any]) -> InvoiceReferenceSearch
                 payment_reference=_string(item.get("PaymentReference")),
                 customer=_party_display_name(counterparty),
                 invoice_number=_string(item.get("OrderNumber")),
+                issue_date=_datetime(item.get("OrderDate")),
+                due_date=_datetime(item.get("ExpiryDate")),
                 paid=bool(item.get("Paid", False)),
+                sent=bool(item.get("IsSent", False)),
                 amount_remaining=_decimal(item.get("ToPay")),
                 billit_status=_string(item.get("OrderStatus")),
                 overdue=bool(item.get("Overdue", False)),
+                days_overdue=_integer(item.get("DaysOverdue")),
                 total=_decimal(item.get("TotalIncl")),
                 currency=_string(item.get("Currency")),
             )
         )
-    return InvoiceReferenceSearchResult(found=bool(matches), matches=matches)
+    return matches
 
 
 def create_invoice_to_billit(invoice: CreateInvoiceInput) -> dict[str, Any]:

@@ -8,8 +8,13 @@ from typing import Any
 import pytest
 
 from mcp_server_billit.config import BillitConfig, BillitEnvironment
-from mcp_server_billit.errors import BillitSafetyError
-from mcp_server_billit.models import CreateCustomer, CreateInvoiceInput, CreateInvoiceLine
+from mcp_server_billit.errors import BillitSafetyError, BillitVerificationError
+from mcp_server_billit.models import (
+    CreateCustomer,
+    CreateInvoiceInput,
+    CreateInvoiceLine,
+    InvoiceDeliveryMethod,
+)
 from mcp_server_billit.service import BillitService
 
 
@@ -19,6 +24,7 @@ class FakeClient:
         self.config = config or BillitConfig(api_key="key", party_id=1)
         self.patch_calls = 0
         self.create_calls = 0
+        self.send_calls: list[tuple[int, InvoiceDeliveryMethod]] = []
 
     async def get_invoice_raw(self, _invoice_id: int) -> dict[str, Any]:
         return deepcopy(self.payload)
@@ -28,6 +34,10 @@ class FakeClient:
     ) -> dict[str, Any]:
         assert payment_reference == "4319"
         assert max_results == 3
+        return {"Items": [deepcopy(self.payload)]}
+
+    async def list_unpaid_invoices_raw(self, *, max_results: int) -> dict[str, Any]:
+        assert max_results == 10
         return {"Items": [deepcopy(self.payload)]}
 
     async def mark_invoice_paid(self, invoice_id: int, **_kwargs: Any) -> None:
@@ -41,6 +51,16 @@ class FakeClient:
         assert payload["OrderType"] == "Invoice"
         assert idempotency_key
         return 987
+
+    async def send_invoice(
+        self,
+        invoice_id: int,
+        *,
+        transport: InvoiceDeliveryMethod,
+    ) -> None:
+        self.send_calls.append((invoice_id, transport))
+        self.payload["IsSent"] = True
+        self.payload["CurrentDocumentDeliveryDetails"] = {"IsDocumentDelivered": True}
 
 
 @pytest.mark.asyncio
@@ -70,6 +90,35 @@ async def test_find_by_payment_reference_is_read_only_and_compact(
     assert result.matches[0].payment_reference == "4319"
     assert client.patch_calls == 0
     assert client.create_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_list_unpaid_invoices_is_read_only_and_compact(
+    invoice_payload: dict[str, Any],
+) -> None:
+    invoice_payload["CounterParty"] = {"DisplayName": "Example Customer"}
+    client = FakeClient(invoice_payload)
+    service = BillitService(client)  # type: ignore[arg-type]
+
+    result = await service.list_unpaid_invoices()
+
+    assert result.returned_count == 1
+    assert result.max_results == 10
+    assert result.has_more is False
+    assert result.invoices[0].invoice_id == 1194146
+    assert client.patch_calls == 0
+    assert client.create_calls == 0
+    assert client.send_calls == []
+
+
+@pytest.mark.asyncio
+async def test_list_unpaid_invoices_rejects_more_than_fifty(
+    invoice_payload: dict[str, Any],
+) -> None:
+    service = BillitService(FakeClient(invoice_payload))  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="between 1 and 50"):
+        await service.list_unpaid_invoices(max_results=51)
 
 
 @pytest.mark.asyncio
@@ -138,3 +187,79 @@ async def test_create_invoice_does_not_send(invoice_payload: dict[str, Any]) -> 
     assert created.sent is False
     assert created.idempotency_key == "stable-attempt"
     assert client.create_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_send_invoice_by_email_is_verified(invoice_payload: dict[str, Any]) -> None:
+    client = FakeClient(invoice_payload)
+    service = BillitService(client)  # type: ignore[arg-type]
+
+    result = await service.send_invoice(1194146, transport=InvoiceDeliveryMethod.EMAIL)
+
+    assert result.sent is True
+    assert result.already_sent is False
+    assert result.delivery_confirmed is True
+    assert result.requested_transport is InvoiceDeliveryMethod.EMAIL
+    assert client.send_calls == [(1194146, InvoiceDeliveryMethod.EMAIL)]
+
+
+@pytest.mark.asyncio
+async def test_already_sent_invoice_is_not_sent_again(invoice_payload: dict[str, Any]) -> None:
+    invoice_payload["IsSent"] = True
+    client = FakeClient(invoice_payload)
+    service = BillitService(client)  # type: ignore[arg-type]
+
+    result = await service.send_invoice(1194146, transport=InvoiceDeliveryMethod.PEPPOL)
+
+    assert result.sent is True
+    assert result.already_sent is True
+    assert client.send_calls == []
+
+
+@pytest.mark.asyncio
+async def test_email_send_requires_customer_email(invoice_payload: dict[str, Any]) -> None:
+    invoice_payload["Customer"].pop("Email")
+    client = FakeClient(invoice_payload)
+    service = BillitService(client)  # type: ignore[arg-type]
+
+    with pytest.raises(BillitSafetyError, match="no customer email"):
+        await service.send_invoice(1194146, transport=InvoiceDeliveryMethod.EMAIL)
+
+    assert client.send_calls == []
+
+
+@pytest.mark.asyncio
+async def test_production_send_requires_second_opt_in(invoice_payload: dict[str, Any]) -> None:
+    client = FakeClient(
+        invoice_payload,
+        config=BillitConfig(
+            api_key="key",
+            party_id=1,
+            environment=BillitEnvironment.PRODUCTION,
+            allow_production_writes=False,
+        ),
+    )
+    service = BillitService(client)  # type: ignore[arg-type]
+
+    with pytest.raises(BillitSafetyError, match="Production writes are disabled"):
+        await service.send_invoice(1194146, transport=InvoiceDeliveryMethod.EMAIL)
+
+    assert client.send_calls == []
+
+
+@pytest.mark.asyncio
+async def test_send_invoice_requires_verifiable_sent_state(invoice_payload: dict[str, Any]) -> None:
+    client = FakeClient(invoice_payload)
+
+    async def do_not_update(
+        _invoice_id: int,
+        *,
+        transport: InvoiceDeliveryMethod,
+    ) -> None:
+        client.send_calls.append((1194146, transport))
+
+    client.send_invoice = do_not_update  # type: ignore[method-assign]
+    service = BillitService(client)  # type: ignore[arg-type]
+
+    with pytest.raises(BillitVerificationError, match="Check Billit before retrying"):
+        await service.send_invoice(1194146, transport=InvoiceDeliveryMethod.PEPPOL)

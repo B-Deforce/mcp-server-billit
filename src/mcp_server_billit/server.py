@@ -16,10 +16,13 @@ from .client import BillitClient
 from .models import (
     CreatedInvoice,
     CreateInvoiceInput,
+    InvoiceDeliveryMethod,
     InvoiceReferenceSearchResult,
+    InvoiceSendStatus,
     InvoiceView,
     PaymentMethod,
     PaymentStatus,
+    UnpaidInvoiceList,
 )
 from .service import BillitService
 
@@ -39,7 +42,7 @@ mcp = MCPServer[AppContext](
     "Billit Personal",
     description="Small, local tools for retrieving and updating invoices in one Billit account.",
     instructions=(
-        "Use get_invoice before proposing a payment-state change. "
+        "Use get_invoice before proposing a payment-state change or sending an invoice. "
         "Never claim create_invoice sends an invoice: it only saves the invoice in Billit."
     ),
     lifespan=app_lifespan,
@@ -75,6 +78,20 @@ async def find_invoices_by_payment_reference(
     return await ctx.request_context.lifespan_context.service.find_invoices_by_payment_reference(
         payment_reference,
         max_results=max_results,
+    )
+
+
+@mcp.tool()
+async def list_unpaid_invoices(
+    ctx: Context[AppContext],
+    max_results: Annotated[int, Field(ge=1, le=50)] = 10,
+) -> UnpaidInvoiceList:
+    """List unpaid outgoing sales invoices, ordered by due date.
+
+    This is read-only. Results default to 10 invoices and are capped at 50.
+    """
+    return await ctx.request_context.lifespan_context.service.list_unpaid_invoices(
+        max_results=max_results
     )
 
 
@@ -115,4 +132,21 @@ async def create_invoice(
     """
     return await ctx.request_context.lifespan_context.service.create_invoice(
         invoice, idempotency_key=idempotency_key
+    )
+
+
+@mcp.tool()
+async def send_invoice(
+    invoice_id: Annotated[int, Field(gt=0)],
+    transport: InvoiceDeliveryMethod,
+    ctx: Context[AppContext],
+) -> InvoiceSendStatus:
+    """Send one existing outgoing invoice by email or Peppol.
+
+    This is an external side effect. Review the invoice, recipient, and transport before approving
+    the call. An invoice already marked sent is not sent again. Peppol never falls back to email.
+    """
+    return await ctx.request_context.lifespan_context.service.send_invoice(
+        invoice_id,
+        transport=transport,
     )

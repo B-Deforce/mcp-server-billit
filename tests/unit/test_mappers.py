@@ -8,6 +8,7 @@ from mcp_server_billit.mappers import (
     create_invoice_to_billit,
     invoice_from_billit,
     reference_search_from_billit,
+    unpaid_invoices_from_billit,
 )
 from mcp_server_billit.models import (
     CreateCustomer,
@@ -84,10 +85,14 @@ def test_payment_reference_search_mapping_returns_compact_matches() -> None:
                     "PaymentReference": "4319",
                     "CounterParty": {"DisplayName": "Example Customer"},
                     "OrderNumber": "2730",
+                    "OrderDate": "2026-08-01T00:00:00",
+                    "ExpiryDate": "2026-08-31T00:00:00",
                     "Paid": True,
+                    "IsSent": True,
                     "ToPay": 0,
                     "OrderStatus": "Paid",
                     "Overdue": False,
+                    "DaysOverdue": 0,
                     "TotalIncl": 160,
                     "Currency": "EUR",
                 }
@@ -103,6 +108,10 @@ def test_payment_reference_search_mapping_returns_compact_matches() -> None:
     assert match.customer == "Example Customer"
     assert match.invoice_number == "2730"
     assert match.paid is True
+    assert match.sent is True
+    assert match.issue_date is not None
+    assert match.due_date is not None
+    assert match.days_overdue == 0
     assert match.amount_remaining == Decimal("0")
     assert match.total == Decimal("160")
 
@@ -111,3 +120,21 @@ def test_payment_reference_search_mapping_handles_no_matches() -> None:
     result = reference_search_from_billit({"Items": []})
     assert result.found is False
     assert result.matches == []
+
+
+def test_unpaid_invoice_mapping_returns_count_and_summaries(
+    invoice_payload: dict[str, Any],
+) -> None:
+    invoice_payload["CounterParty"] = {"DisplayName": "Example Customer"}
+    result = unpaid_invoices_from_billit(
+        {"Items": [invoice_payload], "NextPageLink": "https://example.test/next"},
+        max_results=10,
+    )
+
+    assert result.returned_count == 1
+    assert result.max_results == 10
+    assert result.has_more is True
+    assert result.invoices[0].invoice_id == 1194146
+    assert result.invoices[0].customer == "Example Customer"
+    assert result.invoices[0].amount_remaining == Decimal("242")
+    assert result.invoices[0].sent is False
