@@ -17,7 +17,8 @@ management, partial payments, or hosted transports.
 > [!IMPORTANT]
 > Billit's current API-key documentation limits API keys to personal, non-commercial integrations
 > used for one's own administration and says those integrations are not shared or distributed.
-> Keep this project local/private unless Billit confirms that your intended distribution is allowed.
+> This repository contains no credentials and requires every operator to supply their own. Confirm
+> that your intended use complies with Billit's current terms and documentation.
 > This project is unofficial and is not affiliated with or endorsed by Billit.
 
 ## Safety model
@@ -229,8 +230,7 @@ Never run integration tests against production.
 - [Update payment information](https://docs.billit.be/docs/set-billit-payment-status-after-sending)
 - [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk)
 
-## Release note
+## Packaging note
 
-The distribution name `mcp-server-billit` is provisional. Confirm package-name availability and
-obtain Billit's written clarification on source distribution before publishing this repository or
-a package.
+The distribution name `mcp-server-billit` is provisional. Confirm package-name availability before
+publishing it to a package index.
