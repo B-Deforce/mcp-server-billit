@@ -70,6 +70,64 @@ class FileReference(APIModel):
     mime_type: str | None = None
 
 
+class SupplierView(APIModel):
+    supplier_id: int | None = None
+    name: str | None = None
+    vat_number: str | None = None
+    email: str | None = None
+    iban: str | None = None
+    bic: str | None = None
+    address: InvoiceAddress | None = None
+
+
+class SupplierDocumentSummary(APIModel):
+    order_id: int
+    document_type: str | None = None
+    supplier: str | None = None
+    document_number: str | None = None
+    issue_date: datetime | None = None
+    due_date: datetime | None = None
+    total: Decimal | None = None
+    currency: str | None = None
+    paid: bool = False
+    amount_to_pay: Decimal | None = None
+    billit_status: str | None = None
+    overdue: bool = False
+    days_overdue: int | None = None
+    approval_status: str | None = None
+    external_provider: str | None = None
+    pdf: FileReference | None = None
+    attachment_count: int = 0
+
+
+class SupplierDocumentView(SupplierDocumentSummary):
+    supplier_details: SupplierView | None = None
+    payment_reference: str | None = None
+    purchase_order_reference: str | None = None
+    comments: str | None = None
+    delivery_date: datetime | None = None
+    period_from: datetime | None = None
+    period_till: datetime | None = None
+    created_at: datetime | None = None
+    modified_at: datetime | None = None
+    lines: list[InvoiceLineView] = Field(default_factory=list)
+    attachments: list[FileReference] = Field(default_factory=list)
+    raw: dict[str, Any] | None = None
+
+
+class SupplierDocumentList(APIModel):
+    returned_count: int
+    max_results: int
+    has_more: bool
+    documents: list[SupplierDocumentSummary] = Field(default_factory=list)
+
+
+class SupplierInvoiceSearchResult(SupplierDocumentList):
+    query: str
+    found: bool
+    matched_supplier_count: int | None = None
+
+
 class InvoiceView(APIModel):
     invoice_id: int
     invoice_number: str | None = None

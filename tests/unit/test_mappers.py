@@ -14,6 +14,9 @@ from mcp_server_billit.mappers import (
     invoice_from_billit,
     peppol_capability_from_billit,
     reference_search_from_billit,
+    supplier_document_from_billit,
+    supplier_documents_from_billit,
+    supplier_invoice_search_from_billit,
     unpaid_invoices_from_billit,
 )
 from mcp_server_billit.models import (
@@ -272,3 +275,61 @@ def test_credit_note_status_includes_source_link() -> None:
     assert status.source_invoice_number == "QS-244SC"
     assert status.paid is True
     assert status.sent is False
+
+
+def test_supplier_invoice_mapping_is_compact_and_file_aware(
+    supplier_invoice_payload: dict[str, Any],
+) -> None:
+    document = supplier_document_from_billit(supplier_invoice_payload)
+
+    assert document.order_id == 2619946
+    assert document.document_type == "Invoice"
+    assert document.document_number == "SUP-2026-0042"
+    assert document.supplier == "Éxample Supplier NV"
+    assert document.supplier_details is not None
+    assert document.supplier_details.supplier_id == 602403
+    assert document.supplier_details.iban == "BE2631008777777"
+    assert document.supplier_details.address is not None
+    assert document.supplier_details.address.city == "Brussels"
+    assert document.total == Decimal("242")
+    assert document.amount_to_pay == Decimal("242")
+    assert document.payment_reference == "+++123/4567/89012+++"
+    assert document.approval_status == "Pending"
+    assert document.pdf is not None
+    assert document.pdf.file_id == "pdf-file-id"
+    assert document.attachments[0].file_id == "ubl-file-id"
+    assert document.attachment_count == 1
+    assert document.lines[0].reference == "PART-42"
+    assert document.raw is None
+    assert supplier_document_from_billit(supplier_invoice_payload, include_raw=True).raw is not None
+
+
+def test_supplier_document_list_maps_summaries_and_pagination(
+    supplier_invoice_payload: dict[str, Any],
+) -> None:
+    result = supplier_documents_from_billit(
+        {"Items": [supplier_invoice_payload], "NextPageLink": "next"},
+        max_results=10,
+    )
+
+    assert result.returned_count == 1
+    assert result.has_more is True
+    assert result.documents[0].supplier == "Éxample Supplier NV"
+    assert result.documents[0].pdf is not None
+    assert result.documents[0].attachment_count == 1
+
+
+def test_supplier_invoice_search_reports_query_and_matches(
+    supplier_invoice_payload: dict[str, Any],
+) -> None:
+    result = supplier_invoice_search_from_billit(
+        {"Items": [supplier_invoice_payload]},
+        query="example",
+        matched_supplier_count=1,
+        max_results=25,
+    )
+
+    assert result.query == "example"
+    assert result.found is True
+    assert result.matched_supplier_count == 1
+    assert result.documents[0].document_number == "SUP-2026-0042"

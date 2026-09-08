@@ -20,7 +20,7 @@ ChatGPT on the web does not read your local stdio configuration. It connects to 
 use [Secure MCP Tunnel](https://help.openai.com/en/articles/12584461) if you specifically need to
 bridge a locally running server to a supported ChatGPT workspace.
 
-It exposes twelve tools:
+It exposes seventeen tools:
 
 - `get_invoice`: retrieve one invoice by Billit's `OrderID`
 - `find_invoices_by_payment_reference`: find outgoing invoices by an exact external/payment
@@ -39,6 +39,12 @@ It exposes twelve tools:
 - `mark_credit_note_sent`: update a credit note's sent status without delivering it
 - `send_credit_note`: send an existing credit note by email or Peppol; Peppol credit-note support
   is preflighted
+- `get_supplier_invoice`: retrieve one incoming supplier invoice by Billit `OrderID`
+- `list_supplier_invoices`: list up to 100 incoming supplier invoices, optionally unpaid only
+- `find_supplier_invoices_by_supplier_name`: find supplier invoices using a verified partial
+  supplier-name match
+- `find_supplier_invoices_by_number`: find supplier invoices by their exact supplier-issued number
+- `list_supplier_credit_notes`: list up to 100 incoming supplier credit notes
 
 The server deliberately does not expose arbitrary HTTP requests, batch invoice sending, automatic
 transport fallback, fuzzy customer guesses, Peppol account management, partial payments, or hosted
@@ -80,6 +86,13 @@ transports.
 - Customer-name invoice searches use Billit's customer full-text search, then locally verify a
   case-insensitive, accent-insensitive partial name match before querying orders by exact PartyID.
   Typo-fuzzy guesses are intentionally excluded to avoid mixing similarly named customers.
+- Supplier tools are strictly read-only and query only `OrderDirection=Cost`. Supplier-name
+  searches use the same verified PartyID flow as customer searches. `get_supplier_invoice`
+  rejects sales invoices and supplier credit notes instead of silently returning the wrong kind
+  of document.
+- Supplier PDF and attachment metadata is returned as compact file references. Physical base64
+  file contents are not pulled into model context, and the complete Billit response remains
+  opt-in through `include_raw`.
 - Send commands are single-invoice operations and are never retried automatically after an unknown
   outcome. The tool reads the invoice back and tells the operator to inspect Billit before retrying
   if the sent state cannot be verified.
@@ -231,6 +244,60 @@ Find invoices for a customer using a partial name:
 
 The match is case- and accent-insensitive, but not fuzzy or typo-tolerant. The response reports how
 many customer records matched and returns only invoices tied to those exact customer PartyIDs.
+
+List incoming supplier invoices, with unpaid documents ordered by earliest due date:
+
+```json
+{
+  "max_results": 25,
+  "unpaid_only": true
+}
+```
+
+Use `list_supplier_invoices` for this call. Billit represents accounts-payable invoices as
+`OrderType=Invoice` and `OrderDirection=Cost`. Results include supplier name, invoice number,
+dates, amount remaining, payment and overdue status, approval status, source channel, and compact
+PDF/attachment metadata. `unpaid_only` filters Billit's `Paid` flag; it is document state, not
+independent evidence that no bank payment occurred.
+
+Find supplier invoices by a partial supplier name:
+
+```json
+{
+  "supplier_name": "example supp",
+  "max_results": 25,
+  "unpaid_only": false
+}
+```
+
+The supplier name match is case- and accent-insensitive but not typo-fuzzy. Billit suppliers are
+resolved first and the invoice query uses their exact PartyIDs.
+
+Find an exact supplier-issued invoice number:
+
+```json
+{
+  "invoice_number": "SUP-2026-0042",
+  "max_results": 10
+}
+```
+
+Multiple results remain possible because different suppliers can reuse the same invoice number.
+Use `get_supplier_invoice` with a returned `order_id` to retrieve supplier details, line items,
+payment references, and all PDF/XML attachment references. Set `include_raw=true` only when the
+compact response omits information you specifically need.
+
+Incoming supplier credit notes use the same compact list shape:
+
+```json
+{
+  "max_results": 10
+}
+```
+
+Use `list_supplier_credit_notes`; it filters for `OrderType=CreditNote` and
+`OrderDirection=Cost`. None of the supplier tools marks, approves, pays, exports, or otherwise
+changes a document.
 
 Mark an invoice paid:
 
@@ -408,6 +475,9 @@ Never run integration tests against production.
 - [Billit header values](https://docs.billit.be/docs/header-values)
 - [Billit Orders API](https://docs.billit.be/reference/order-1)
 - [Billit OData filtering](https://docs.billit.be/docs/odata)
+- [List incoming supplier invoices](https://docs.billit.be/docs/get-list-of-incoming-invoices)
+- [Retrieve an incoming invoice or credit note](https://docs.billit.be/docs/get-information-about-one-invoicecreditnote)
+- [Supplier invoice files](https://docs.billit.be/docs/get-files)
 - [Search parties](https://docs.billit.be/reference/party_getparties-1)
 - [Retrieve one order](https://docs.billit.be/reference/order_getorders_orderid)
 - [Patch one order](https://docs.billit.be/reference/order_patchorders-1)

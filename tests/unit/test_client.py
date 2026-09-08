@@ -96,6 +96,78 @@ async def test_unpaid_search_uses_fixed_filter_sort_and_limit() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("unpaid_only", "expected_filter", "expected_order"),
+    [
+        (
+            False,
+            "OrderType eq 'Invoice' and OrderDirection eq 'Cost'",
+            "OrderDate desc,OrderID desc",
+        ),
+        (
+            True,
+            "OrderType eq 'Invoice' and OrderDirection eq 'Cost' and Paid eq false",
+            "ExpiryDate asc,OrderID asc",
+        ),
+    ],
+)
+async def test_supplier_invoice_list_uses_cost_filter(
+    unpaid_only: bool,
+    expected_filter: str,
+    expected_order: str,
+) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/orders"
+        assert request.url.params["$filter"] == expected_filter
+        assert request.url.params["$orderby"] == expected_order
+        assert request.url.params["$top"] == "25"
+        return httpx.Response(200, json={"Items": []})
+
+    async with BillitClient(config(), transport=httpx.MockTransport(handler)) as client:
+        result = await client.list_supplier_invoices_raw(
+            max_results=25,
+            unpaid_only=unpaid_only,
+        )
+
+    assert result == {"Items": []}
+
+
+@pytest.mark.asyncio
+async def test_supplier_credit_note_list_uses_cost_filter() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/orders"
+        assert request.url.params["$filter"] == (
+            "OrderType eq 'CreditNote' and OrderDirection eq 'Cost'"
+        )
+        assert request.url.params["$orderby"] == "OrderDate desc,OrderID desc"
+        return httpx.Response(200, json={"Items": []})
+
+    async with BillitClient(config(), transport=httpx.MockTransport(handler)) as client:
+        result = await client.list_supplier_credit_notes_raw(max_results=10)
+
+    assert result == {"Items": []}
+
+
+@pytest.mark.asyncio
+async def test_supplier_invoice_number_search_escapes_odata_value() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/orders"
+        assert request.url.params["$filter"] == (
+            "OrderType eq 'Invoice' and OrderDirection eq 'Cost' and OrderNumber eq 'O''Brien-42'"
+        )
+        assert request.url.params["$top"] == "7"
+        return httpx.Response(200, json={"Items": []})
+
+    async with BillitClient(config(), transport=httpx.MockTransport(handler)) as client:
+        result = await client.find_supplier_invoices_by_number_raw(
+            "O'Brien-42",
+            max_results=7,
+        )
+
+    assert result == {"Items": []}
+
+
+@pytest.mark.asyncio
 async def test_customer_search_and_invoice_lookup_use_fixed_filters() -> None:
     calls = 0
 
@@ -123,6 +195,52 @@ async def test_customer_search_and_invoice_lookup_use_fixed_filters() -> None:
 
     assert customers["Items"][0]["PartyID"] == 12
     assert invoices == {"Items": []}
+
+
+@pytest.mark.asyncio
+async def test_supplier_search_and_invoice_lookup_use_exact_party_ids() -> None:
+    calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            assert request.url.path == "/v1/parties"
+            assert request.url.params["$filter"] == "PartyType eq 'Supplier'"
+            assert request.url.params["fullTextSearch"] == "Example"
+            assert request.url.params["$top"] == "100"
+            return httpx.Response(200, json={"Items": [{"PartyID": 12}]})
+        assert request.url.path == "/v1/orders"
+        assert request.url.params["$filter"] == (
+            "OrderType eq 'Invoice' and OrderDirection eq 'Cost' "
+            "and (CounterParty/PartyID eq 12 or CounterParty/PartyID eq 34) "
+            "and Paid eq false"
+        )
+        assert request.url.params["$orderby"] == "ExpiryDate asc,OrderID asc"
+        assert request.url.params["$top"] == "25"
+        return httpx.Response(200, json={"Items": []})
+
+    async with BillitClient(config(), transport=httpx.MockTransport(handler)) as client:
+        suppliers = await client.search_suppliers_raw("Example")
+        invoices = await client.find_supplier_invoices_by_supplier_ids_raw(
+            [12, 34],
+            max_results=25,
+            unpaid_only=True,
+        )
+
+    assert suppliers["Items"][0]["PartyID"] == 12
+    assert invoices == {"Items": []}
+
+
+@pytest.mark.asyncio
+async def test_empty_supplier_ids_do_not_make_an_http_request() -> None:
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        pytest.fail("No request should be made for an empty supplier-ID set")
+
+    async with BillitClient(config(), transport=httpx.MockTransport(handler)) as client:
+        result = await client.find_supplier_invoices_by_supplier_ids_raw([], max_results=10)
+
+    assert result == {"Items": []}
 
 
 @pytest.mark.asyncio

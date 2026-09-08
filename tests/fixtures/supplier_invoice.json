@@ -1,0 +1,76 @@
+{
+  "OrderID": 2619946,
+  "CompanyID": 1079382,
+  "OrderPDF": {
+    "FileID": "pdf-file-id",
+    "FileName": "supplier-invoice.pdf",
+    "MimeType": "application/pdf"
+  },
+  "Attachments": [
+    {
+      "FileID": "ubl-file-id",
+      "FileName": "supplier-invoice.xml",
+      "MimeType": "text/xml"
+    }
+  ],
+  "OrderNumber": "SUP-2026-0042",
+  "Supplier": {
+    "PartyID": 602403,
+    "Name": "Éxample Supplier",
+    "DisplayName": "Éxample Supplier NV",
+    "VATNumber": "BE0454299999",
+    "Email": "accounts@supplier.example",
+    "IBAN": "BE2631008777777",
+    "BIC": "BBRUBEBB",
+    "Addresses": [
+      {
+        "AddressType": "InvoiceAddress",
+        "Street": "Supplier Street",
+        "StreetNumber": "42",
+        "Zipcode": "1000",
+        "City": "Brussels",
+        "CountryCode": "BE"
+      }
+    ]
+  },
+  "CounterParty": {
+    "PartyID": 602403,
+    "DisplayName": "Éxample Supplier NV"
+  },
+  "OrderDate": "2026-09-01T00:00:00",
+  "ExpiryDate": "2026-10-01T00:00:00",
+  "OrderType": "Invoice",
+  "OrderDirection": "Cost",
+  "OrderLines": [
+    {
+      "Description": "Components",
+      "Quantity": 2,
+      "UnitPriceExcl": 100,
+      "VATPercentage": 21,
+      "TotalExcl": 200,
+      "TotalVAT": 42,
+      "TotalIncl": 242,
+      "Reference": "PART-42"
+    }
+  ],
+  "TotalExcl": 200,
+  "TotalVAT": 42,
+  "TotalIncl": 242,
+  "Currency": "EUR",
+  "PaymentReference": "+++123/4567/89012+++",
+  "Reference": "PO-2026-11",
+  "Comments": "September delivery",
+  "DeliveryDate": "2026-08-31T00:00:00",
+  "PeriodFrom": "2026-08-01T00:00:00",
+  "PeriodTill": "2026-08-31T00:00:00",
+  "Created": "2026-09-01T08:00:00",
+  "LastModified": "2026-09-01T08:05:00",
+  "Paid": false,
+  "ToPay": 242,
+  "OrderStatus": "ToPay",
+  "Overdue": false,
+  "DaysOverdue": -23,
+  "ApprovalStatus": "Pending",
+  "ExternalProvider": "Peppol",
+  "IsSent": false
+}

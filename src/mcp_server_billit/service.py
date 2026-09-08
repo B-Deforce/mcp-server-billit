@@ -21,6 +21,9 @@ from .mappers import (
     payment_status_from_billit,
     peppol_capability_from_billit,
     reference_search_from_billit,
+    supplier_document_from_billit,
+    supplier_documents_from_billit,
+    supplier_invoice_search_from_billit,
     unpaid_invoices_from_billit,
 )
 from .models import (
@@ -38,6 +41,9 @@ from .models import (
     PaymentStatus,
     PeppolDocumentType,
     PeppolRecipientCapability,
+    SupplierDocumentList,
+    SupplierDocumentView,
+    SupplierInvoiceSearchResult,
     UnpaidInvoiceList,
 )
 
@@ -70,6 +76,98 @@ class BillitService:
             raise ValueError("max_results must be between 1 and 100")
         raw = await self.client.list_unpaid_invoices_raw(max_results=max_results)
         return unpaid_invoices_from_billit(raw, max_results=max_results)
+
+    async def get_supplier_invoice(
+        self,
+        invoice_id: int,
+        *,
+        include_raw: bool = False,
+    ) -> SupplierDocumentView:
+        raw = await self.client.get_invoice_raw(invoice_id)
+        self._ensure_supplier_document(raw, invoice_id, expected_type="invoice")
+        return supplier_document_from_billit(raw, include_raw=include_raw)
+
+    async def list_supplier_invoices(
+        self,
+        *,
+        max_results: int = 10,
+        unpaid_only: bool = False,
+    ) -> SupplierDocumentList:
+        self._validate_max_results(max_results)
+        raw = await self.client.list_supplier_invoices_raw(
+            max_results=max_results,
+            unpaid_only=unpaid_only,
+        )
+        return supplier_documents_from_billit(raw, max_results=max_results)
+
+    async def list_supplier_credit_notes(
+        self,
+        *,
+        max_results: int = 10,
+    ) -> SupplierDocumentList:
+        self._validate_max_results(max_results)
+        raw = await self.client.list_supplier_credit_notes_raw(max_results=max_results)
+        return supplier_documents_from_billit(raw, max_results=max_results)
+
+    async def find_supplier_invoices_by_number(
+        self,
+        invoice_number: str,
+        *,
+        max_results: int = 10,
+    ) -> SupplierInvoiceSearchResult:
+        query = invoice_number.strip()
+        if not query:
+            raise ValueError("invoice_number must not be empty")
+        self._validate_max_results(max_results)
+        raw = await self.client.find_supplier_invoices_by_number_raw(
+            query,
+            max_results=max_results,
+        )
+        return supplier_invoice_search_from_billit(
+            raw,
+            query=query,
+            max_results=max_results,
+        )
+
+    async def find_supplier_invoices_by_supplier_name(
+        self,
+        supplier_name: str,
+        *,
+        max_results: int = 10,
+        unpaid_only: bool = False,
+    ) -> SupplierInvoiceSearchResult:
+        query = supplier_name.strip()
+        if not query:
+            raise ValueError("supplier_name must not be empty")
+        self._validate_max_results(max_results)
+
+        supplier_data = await self.client.search_suppliers_raw(query, max_results=100)
+        normalized_query = _normalize_name(query)
+        matched_ids: list[int] = []
+        for party in _items(supplier_data):
+            party_id = _party_id(party)
+            names = _party_names(party)
+            if party_id is not None and any(
+                normalized_query in _normalize_name(name) for name in names
+            ):
+                matched_ids.append(party_id)
+        matched_ids = list(dict.fromkeys(matched_ids))
+
+        invoices = await self.client.find_supplier_invoices_by_supplier_ids_raw(
+            matched_ids,
+            max_results=max_results,
+            unpaid_only=unpaid_only,
+        )
+        supplier_results_have_more = bool(
+            supplier_data.get("NextPageLink") or supplier_data.get("nextPageLink")
+        )
+        return supplier_invoice_search_from_billit(
+            invoices,
+            query=query,
+            matched_supplier_count=len(matched_ids),
+            max_results=max_results,
+            supplier_results_have_more=supplier_results_have_more,
+        )
 
     async def find_invoices_by_customer_name(
         self,
@@ -432,6 +530,25 @@ class BillitService:
                 f"Order {order_id} is not an outgoing sales credit note; "
                 f"no {operation} action was taken."
             )
+
+    @staticmethod
+    def _ensure_supplier_document(
+        order: dict[str, object],
+        order_id: int,
+        *,
+        expected_type: str,
+    ) -> None:
+        order_type = str(order.get("OrderType", "")).lower()
+        order_direction = str(order.get("OrderDirection", "")).lower()
+        if order_type != expected_type or order_direction != "cost":
+            raise BillitSafetyError(
+                f"Order {order_id} is not a supplier {expected_type}; nothing was returned."
+            )
+
+    @staticmethod
+    def _validate_max_results(max_results: int) -> None:
+        if not 1 <= max_results <= 100:
+            raise ValueError("max_results must be between 1 and 100")
 
     @staticmethod
     def _ensure_customer_email(

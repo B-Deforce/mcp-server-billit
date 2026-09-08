@@ -15,6 +15,13 @@ def invoice_payload() -> dict[str, Any]:
 
 
 @pytest.fixture
+def supplier_invoice_payload() -> dict[str, Any]:
+    path = Path(__file__).parent / "fixtures" / "supplier_invoice.json"
+    value: dict[str, Any] = json.loads(path.read_text())
+    return value
+
+
+@pytest.fixture
 def validation_error_payload() -> dict[str, Any]:
     path = Path(__file__).parent / "fixtures" / "validation_error.json"
     value: dict[str, Any] = json.loads(path.read_text())

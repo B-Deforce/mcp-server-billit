@@ -14,7 +14,12 @@ async def test_server_advertises_only_the_intended_tools() -> None:
         "create_invoice",
         "find_invoices_by_customer_name",
         "find_invoices_by_payment_reference",
+        "find_supplier_invoices_by_number",
+        "find_supplier_invoices_by_supplier_name",
         "get_invoice",
+        "get_supplier_invoice",
+        "list_supplier_credit_notes",
+        "list_supplier_invoices",
         "list_unpaid_invoices",
         "mark_invoice_paid",
         "mark_credit_note_paid",
@@ -48,3 +53,23 @@ async def test_server_advertises_only_the_intended_tools() -> None:
     send_credit = next(tool for tool in tools if tool.name == "send_credit_note")
     assert "external side effect" in (send_credit.description or "").lower()
     assert "credit-note-specific" in (send_credit.description or "").lower()
+
+    supplier_list = next(tool for tool in tools if tool.name == "list_supplier_invoices")
+    assert "read-only" in (supplier_list.description or "").lower()
+    assert "unpaid_only" in (supplier_list.description or "")
+
+    supplier_get = next(tool for tool in tools if tool.name == "get_supplier_invoice")
+    assert "raw billit data" in (supplier_get.description or "").lower()
+
+    supplier_name = next(
+        tool for tool in tools if tool.name == "find_supplier_invoices_by_supplier_name"
+    )
+    assert "partial" in (supplier_name.description or "").lower()
+
+    supplier_number = next(
+        tool for tool in tools if tool.name == "find_supplier_invoices_by_number"
+    )
+    assert "exact" in (supplier_number.description or "").lower()
+
+    supplier_credits = next(tool for tool in tools if tool.name == "list_supplier_credit_notes")
+    assert "read-only" in (supplier_credits.description or "").lower()

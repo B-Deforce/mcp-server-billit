@@ -108,6 +108,78 @@ class BillitClient:
             raise BillitServerError("Billit returned an unexpected unpaid-invoice response shape.")
         return value
 
+    async def list_supplier_invoices_raw(
+        self,
+        *,
+        max_results: int = 10,
+        unpaid_only: bool = False,
+    ) -> dict[str, Any]:
+        odata_filter = "OrderType eq 'Invoice' and OrderDirection eq 'Cost'"
+        if unpaid_only:
+            odata_filter += " and Paid eq false"
+        response = await self._get_with_retries(
+            "/v1/orders",
+            params={
+                "$filter": odata_filter,
+                "$orderby": (
+                    "ExpiryDate asc,OrderID asc" if unpaid_only else "OrderDate desc,OrderID desc"
+                ),
+                "$top": str(max_results),
+            },
+        )
+        value = self._json(response)
+        if not isinstance(value, dict):
+            raise BillitServerError(
+                "Billit returned an unexpected supplier-invoice response shape."
+            )
+        return value
+
+    async def list_supplier_credit_notes_raw(
+        self,
+        *,
+        max_results: int = 10,
+    ) -> dict[str, Any]:
+        response = await self._get_with_retries(
+            "/v1/orders",
+            params={
+                "$filter": "OrderType eq 'CreditNote' and OrderDirection eq 'Cost'",
+                "$orderby": "OrderDate desc,OrderID desc",
+                "$top": str(max_results),
+            },
+        )
+        value = self._json(response)
+        if not isinstance(value, dict):
+            raise BillitServerError(
+                "Billit returned an unexpected supplier-credit-note response shape."
+            )
+        return value
+
+    async def find_supplier_invoices_by_number_raw(
+        self,
+        invoice_number: str,
+        *,
+        max_results: int = 10,
+    ) -> dict[str, Any]:
+        escaped_number = invoice_number.replace("'", "''")
+        odata_filter = (
+            "OrderType eq 'Invoice' and OrderDirection eq 'Cost' "
+            f"and OrderNumber eq '{escaped_number}'"
+        )
+        response = await self._get_with_retries(
+            "/v1/orders",
+            params={
+                "$filter": odata_filter,
+                "$orderby": "OrderDate desc,OrderID desc",
+                "$top": str(max_results),
+            },
+        )
+        value = self._json(response)
+        if not isinstance(value, dict):
+            raise BillitServerError(
+                "Billit returned an unexpected supplier-invoice search response shape."
+            )
+        return value
+
     async def search_customers_raw(
         self,
         customer_name: str,
@@ -125,6 +197,25 @@ class BillitClient:
         value = self._json(response)
         if not isinstance(value, dict):
             raise BillitServerError("Billit returned an unexpected customer-search response shape.")
+        return value
+
+    async def search_suppliers_raw(
+        self,
+        supplier_name: str,
+        *,
+        max_results: int = 100,
+    ) -> dict[str, Any]:
+        response = await self._get_with_retries(
+            "/v1/parties",
+            params={
+                "$filter": "PartyType eq 'Supplier'",
+                "fullTextSearch": supplier_name,
+                "$top": str(max_results),
+            },
+        )
+        value = self._json(response)
+        if not isinstance(value, dict):
+            raise BillitServerError("Billit returned an unexpected supplier-search response shape.")
         return value
 
     async def find_invoices_by_customer_ids_raw(
@@ -153,6 +244,40 @@ class BillitClient:
         if not isinstance(value, dict):
             raise BillitServerError(
                 "Billit returned an unexpected customer-invoice response shape."
+            )
+        return value
+
+    async def find_supplier_invoices_by_supplier_ids_raw(
+        self,
+        supplier_ids: list[int],
+        *,
+        max_results: int = 10,
+        unpaid_only: bool = False,
+    ) -> dict[str, Any]:
+        if not supplier_ids:
+            return {"Items": []}
+        supplier_filter = " or ".join(
+            f"CounterParty/PartyID eq {supplier_id}" for supplier_id in supplier_ids
+        )
+        odata_filter = (
+            f"OrderType eq 'Invoice' and OrderDirection eq 'Cost' and ({supplier_filter})"
+        )
+        if unpaid_only:
+            odata_filter += " and Paid eq false"
+        response = await self._get_with_retries(
+            "/v1/orders",
+            params={
+                "$filter": odata_filter,
+                "$orderby": (
+                    "ExpiryDate asc,OrderID asc" if unpaid_only else "OrderDate desc,OrderID desc"
+                ),
+                "$top": str(max_results),
+            },
+        )
+        value = self._json(response)
+        if not isinstance(value, dict):
+            raise BillitServerError(
+                "Billit returned an unexpected supplier-invoice search response shape."
             )
         return value
 

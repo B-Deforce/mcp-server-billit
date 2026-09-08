@@ -84,6 +84,11 @@ or dumping an MCP configuration file when they could expose credentials.
   an invoice capability does not authorize a credit-note send. It must never fall back to email.
 - Customer-name search must resolve verified customer PartyIDs before retrieving invoices. Do not
   introduce automatic fuzzy matching that can mix similarly named customers.
+- Supplier reads must filter `OrderDirection=Cost`; invoices and credit notes must remain distinct.
+  Supplier-name search must locally verify the match and query by exact PartyID. Supplier tools are
+  read-only and must not patch payment, approval, export, or `IsSent` state.
+- Keep physical supplier PDF/XML contents out of default MCP responses. Return file references and
+  keep the complete raw order opt-in.
 - Keep default tool responses compact and make privacy-heavy raw data opt-in.
 - Never add batch-send behavior without an explicit, separately reviewed design.
 

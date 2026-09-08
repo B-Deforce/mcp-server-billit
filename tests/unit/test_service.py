@@ -49,6 +49,30 @@ class FakeClient:
         assert max_results == 10
         return {"Items": [deepcopy(self.payload)]}
 
+    async def list_supplier_invoices_raw(
+        self,
+        *,
+        max_results: int,
+        unpaid_only: bool,
+    ) -> dict[str, Any]:
+        assert max_results == 25
+        assert unpaid_only is True
+        return {"Items": [deepcopy(self.payload)]}
+
+    async def list_supplier_credit_notes_raw(self, *, max_results: int) -> dict[str, Any]:
+        assert max_results == 10
+        return {"Items": [deepcopy(self.payload)]}
+
+    async def find_supplier_invoices_by_number_raw(
+        self,
+        invoice_number: str,
+        *,
+        max_results: int,
+    ) -> dict[str, Any]:
+        assert invoice_number == "SUP-2026-0042"
+        assert max_results == 10
+        return {"Items": [deepcopy(self.payload)]}
+
     async def search_customers_raw(self, customer_name: str, *, max_results: int) -> dict[str, Any]:
         assert customer_name == "exam"
         assert max_results == 100
@@ -59,11 +83,38 @@ class FakeClient:
             ]
         }
 
+    async def search_suppliers_raw(
+        self,
+        supplier_name: str,
+        *,
+        max_results: int,
+    ) -> dict[str, Any]:
+        assert supplier_name == "example"
+        assert max_results == 100
+        return {
+            "Items": [
+                {"PartyID": 602403, "Name": "Éxample Supplier"},
+                {"PartyID": 999, "Name": "Unrelated Supplier"},
+            ]
+        }
+
     async def find_invoices_by_customer_ids_raw(
         self, customer_ids: list[int], *, max_results: int
     ) -> dict[str, Any]:
         assert customer_ids == [588708]
         assert max_results == 25
+        return {"Items": [deepcopy(self.payload)]}
+
+    async def find_supplier_invoices_by_supplier_ids_raw(
+        self,
+        supplier_ids: list[int],
+        *,
+        max_results: int,
+        unpaid_only: bool,
+    ) -> dict[str, Any]:
+        assert supplier_ids == [602403]
+        assert max_results == 25
+        assert unpaid_only is True
         return {"Items": [deepcopy(self.payload)]}
 
     async def get_peppol_participant_raw(self, identifier: str) -> dict[str, Any]:
@@ -191,6 +242,114 @@ async def test_list_unpaid_invoices_accepts_one_hundred_and_rejects_more(
     assert result.max_results == 100
     with pytest.raises(ValueError, match="between 1 and 100"):
         await service.list_unpaid_invoices(max_results=101)
+
+
+@pytest.mark.asyncio
+async def test_get_supplier_invoice_is_typed_compact_and_read_only(
+    supplier_invoice_payload: dict[str, Any],
+) -> None:
+    client = FakeClient(supplier_invoice_payload)
+    service = BillitService(client)  # type: ignore[arg-type]
+
+    result = await service.get_supplier_invoice(2619946)
+
+    assert result.document_number == "SUP-2026-0042"
+    assert result.supplier == "Éxample Supplier NV"
+    assert result.raw is None
+    assert result.attachments[0].filename == "supplier-invoice.xml"
+    assert client.patch_calls == 0
+    assert client.create_calls == 0
+    assert client.send_calls == []
+
+
+@pytest.mark.asyncio
+async def test_get_supplier_invoice_rejects_sales_invoice(
+    invoice_payload: dict[str, Any],
+) -> None:
+    client = FakeClient(invoice_payload)
+    service = BillitService(client)  # type: ignore[arg-type]
+
+    with pytest.raises(BillitSafetyError, match="not a supplier invoice"):
+        await service.get_supplier_invoice(1194146)
+
+
+@pytest.mark.asyncio
+async def test_list_unpaid_supplier_invoices_is_read_only(
+    supplier_invoice_payload: dict[str, Any],
+) -> None:
+    client = FakeClient(supplier_invoice_payload)
+    service = BillitService(client)  # type: ignore[arg-type]
+
+    result = await service.list_supplier_invoices(max_results=25, unpaid_only=True)
+
+    assert result.returned_count == 1
+    assert result.documents[0].order_id == 2619946
+    assert result.documents[0].paid is False
+    assert client.patch_calls == 0
+    assert client.create_calls == 0
+    assert client.send_calls == []
+
+
+@pytest.mark.asyncio
+async def test_find_supplier_invoices_by_verified_partial_name(
+    supplier_invoice_payload: dict[str, Any],
+) -> None:
+    client = FakeClient(supplier_invoice_payload)
+    service = BillitService(client)  # type: ignore[arg-type]
+
+    result = await service.find_supplier_invoices_by_supplier_name(
+        "  example  ",
+        max_results=25,
+        unpaid_only=True,
+    )
+
+    assert result.query == "example"
+    assert result.matched_supplier_count == 1
+    assert result.documents[0].supplier == "Éxample Supplier NV"
+    assert client.patch_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_find_supplier_invoices_by_exact_number(
+    supplier_invoice_payload: dict[str, Any],
+) -> None:
+    client = FakeClient(supplier_invoice_payload)
+    service = BillitService(client)  # type: ignore[arg-type]
+
+    result = await service.find_supplier_invoices_by_number(" SUP-2026-0042 ")
+
+    assert result.found is True
+    assert result.query == "SUP-2026-0042"
+    assert result.matched_supplier_count is None
+    assert result.documents[0].order_id == 2619946
+
+
+@pytest.mark.asyncio
+async def test_list_supplier_credit_notes(
+    supplier_invoice_payload: dict[str, Any],
+) -> None:
+    supplier_invoice_payload["OrderType"] = "CreditNote"
+    supplier_invoice_payload["OrderNumber"] = "CN-SUP-42"
+    client = FakeClient(supplier_invoice_payload)
+    service = BillitService(client)  # type: ignore[arg-type]
+
+    result = await service.list_supplier_credit_notes()
+
+    assert result.documents[0].document_type == "CreditNote"
+    assert result.documents[0].document_number == "CN-SUP-42"
+
+
+@pytest.mark.asyncio
+async def test_supplier_lists_validate_max_results(
+    supplier_invoice_payload: dict[str, Any],
+) -> None:
+    client = FakeClient(supplier_invoice_payload)
+    service = BillitService(client)  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="between 1 and 100"):
+        await service.list_supplier_invoices(max_results=101)
+    with pytest.raises(ValueError, match="between 1 and 100"):
+        await service.list_supplier_credit_notes(max_results=0)
 
 
 @pytest.mark.asyncio

@@ -27,6 +27,9 @@ from .models import (
     PaymentMethod,
     PaymentStatus,
     PeppolRecipientCapability,
+    SupplierDocumentList,
+    SupplierDocumentView,
+    SupplierInvoiceSearchResult,
     UnpaidInvoiceList,
 )
 from .service import BillitService
@@ -50,6 +53,7 @@ mcp = MCPServer[AppContext](
         "Use get_invoice before proposing a payment-state change, delivery, or credit note. "
         "Never claim create_invoice sends an invoice: it only saves the invoice in Billit. "
         "Creating a credit note saves a full credit derived from an invoice but does not send it. "
+        "Supplier-invoice and supplier-credit-note tools are read-only. "
         "Peppol sends require a successful document-specific recipient capability preflight."
     ),
     lifespan=app_lifespan,
@@ -98,6 +102,95 @@ async def list_unpaid_invoices(
     This is read-only. Results default to 10 invoices and are capped at 100.
     """
     return await ctx.request_context.lifespan_context.service.list_unpaid_invoices(
+        max_results=max_results
+    )
+
+
+@mcp.tool()
+async def get_supplier_invoice(
+    invoice_id: Annotated[int, Field(gt=0)],
+    ctx: Context[AppContext],
+    include_raw: bool = False,
+) -> SupplierDocumentView:
+    """Retrieve one incoming supplier invoice by its Billit OrderID.
+
+    This is read-only and rejects sales invoices and supplier credit notes. The compact response
+    includes supplier, payment, line, PDF, and attachment-reference data. Raw Billit data remains
+    opt-in because it can be large and privacy-heavy.
+    """
+    return await ctx.request_context.lifespan_context.service.get_supplier_invoice(
+        invoice_id,
+        include_raw=include_raw,
+    )
+
+
+@mcp.tool()
+async def list_supplier_invoices(
+    ctx: Context[AppContext],
+    max_results: Annotated[int, Field(ge=1, le=100)] = 10,
+    unpaid_only: bool = False,
+) -> SupplierDocumentList:
+    """List incoming supplier invoices from accounts payable.
+
+    This is read-only. Results default to the newest 10 invoices and are capped at 100. With
+    unpaid_only=true, only invoices with Billit's Paid=false flag are returned, ordered by earliest
+    due date. That flag is Billit document state, not independent proof from a bank transaction.
+    """
+    return await ctx.request_context.lifespan_context.service.list_supplier_invoices(
+        max_results=max_results,
+        unpaid_only=unpaid_only,
+    )
+
+
+@mcp.tool()
+async def find_supplier_invoices_by_supplier_name(
+    supplier_name: Annotated[str, Field(min_length=1, max_length=250)],
+    ctx: Context[AppContext],
+    max_results: Annotated[int, Field(ge=1, le=100)] = 10,
+    unpaid_only: bool = False,
+) -> SupplierInvoiceSearchResult:
+    """Find supplier invoices by a verified case-insensitive partial supplier-name match.
+
+    This is read-only. Billit suppliers are searched first, the partial name is verified locally,
+    and invoices are then queried by exact supplier PartyID. Typo-fuzzy guesses are excluded to
+    avoid mixing documents from similarly named suppliers.
+    """
+    return (
+        await ctx.request_context.lifespan_context.service.find_supplier_invoices_by_supplier_name(
+            supplier_name,
+            max_results=max_results,
+            unpaid_only=unpaid_only,
+        )
+    )
+
+
+@mcp.tool()
+async def find_supplier_invoices_by_number(
+    invoice_number: Annotated[str, Field(min_length=1, max_length=250)],
+    ctx: Context[AppContext],
+    max_results: Annotated[int, Field(ge=1, le=100)] = 10,
+) -> SupplierInvoiceSearchResult:
+    """Find incoming supplier invoices by exact supplier invoice number.
+
+    This is read-only. Multiple results may be returned because different suppliers can use the
+    same invoice number.
+    """
+    return await ctx.request_context.lifespan_context.service.find_supplier_invoices_by_number(
+        invoice_number,
+        max_results=max_results,
+    )
+
+
+@mcp.tool()
+async def list_supplier_credit_notes(
+    ctx: Context[AppContext],
+    max_results: Annotated[int, Field(ge=1, le=100)] = 10,
+) -> SupplierDocumentList:
+    """List incoming supplier credit notes, newest first.
+
+    This is read-only. Results default to 10 credit notes and are capped at 100.
+    """
+    return await ctx.request_context.lifespan_context.service.list_supplier_credit_notes(
         max_results=max_results
     )
 

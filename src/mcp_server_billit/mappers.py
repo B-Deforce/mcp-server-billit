@@ -24,6 +24,11 @@ from .models import (
     PaymentStatus,
     PeppolDocumentType,
     PeppolRecipientCapability,
+    SupplierDocumentList,
+    SupplierDocumentSummary,
+    SupplierDocumentView,
+    SupplierInvoiceSearchResult,
+    SupplierView,
     UnpaidInvoiceList,
 )
 
@@ -109,6 +114,71 @@ def customer_invoice_search_from_billit(
         max_results=max_results,
         has_more=customer_results_have_more or bool(next_page),
         invoices=invoices,
+    )
+
+
+def supplier_document_from_billit(
+    data: dict[str, Any],
+    *,
+    include_raw: bool = False,
+) -> SupplierDocumentView:
+    supplier_data = data.get("Supplier")
+    if not isinstance(supplier_data, dict):
+        supplier_data = data.get("CounterParty")
+    lines_data = data.get("OrderLines") or data.get("Orderlines") or []
+    attachments_data = data.get("Attachments") or []
+    summary = _supplier_document_summary(data)
+
+    return SupplierDocumentView(
+        **summary.model_dump(),
+        supplier_details=_supplier(supplier_data) if isinstance(supplier_data, dict) else None,
+        payment_reference=_string(data.get("PaymentReference")),
+        purchase_order_reference=_string(data.get("Reference")),
+        comments=_string(data.get("Comments")),
+        delivery_date=_datetime(data.get("DeliveryDate")),
+        period_from=_datetime(data.get("PeriodFrom")),
+        period_till=_datetime(data.get("PeriodTill")),
+        created_at=_datetime(data.get("Created")),
+        modified_at=_datetime(data.get("LastModified")),
+        lines=[_line(line) for line in lines_data if isinstance(line, dict)],
+        attachments=[_file_reference(item) for item in attachments_data if isinstance(item, dict)],
+        raw=data if include_raw else None,
+    )
+
+
+def supplier_documents_from_billit(
+    data: dict[str, Any],
+    *,
+    max_results: int,
+) -> SupplierDocumentList:
+    documents = _supplier_document_summaries(data)
+    next_page = data.get("NextPageLink") or data.get("nextPageLink")
+    return SupplierDocumentList(
+        returned_count=len(documents),
+        max_results=max_results,
+        has_more=bool(next_page),
+        documents=documents,
+    )
+
+
+def supplier_invoice_search_from_billit(
+    data: dict[str, Any],
+    *,
+    query: str,
+    max_results: int,
+    matched_supplier_count: int | None = None,
+    supplier_results_have_more: bool = False,
+) -> SupplierInvoiceSearchResult:
+    documents = _supplier_document_summaries(data)
+    next_page = data.get("NextPageLink") or data.get("nextPageLink")
+    return SupplierInvoiceSearchResult(
+        query=query,
+        found=bool(documents),
+        matched_supplier_count=matched_supplier_count,
+        returned_count=len(documents),
+        max_results=max_results,
+        has_more=supplier_results_have_more or bool(next_page),
+        documents=documents,
     )
 
 
@@ -308,6 +378,45 @@ def _invoice_summaries(data: dict[str, Any]) -> list[InvoiceReferenceMatch]:
     return matches
 
 
+def _supplier_document_summaries(data: dict[str, Any]) -> list[SupplierDocumentSummary]:
+    items = data.get("Items") or data.get("items") or data.get("value") or []
+    if not isinstance(items, list):
+        return []
+    return [
+        _supplier_document_summary(item)
+        for item in items
+        if isinstance(item, dict) and item.get("OrderID") is not None
+    ]
+
+
+def _supplier_document_summary(data: dict[str, Any]) -> SupplierDocumentSummary:
+    supplier_data = data.get("Supplier")
+    if not isinstance(supplier_data, dict):
+        supplier_data = data.get("CounterParty")
+    pdf_data = data.get("OrderPDF")
+    attachments_data = data.get("Attachments") or []
+    attachment_count = len(attachments_data) if isinstance(attachments_data, list) else 0
+    return SupplierDocumentSummary(
+        order_id=int(data["OrderID"]),
+        document_type=_string(data.get("OrderType")),
+        supplier=_party_display_name(supplier_data),
+        document_number=_string(data.get("OrderNumber")),
+        issue_date=_datetime(data.get("OrderDate")),
+        due_date=_datetime(data.get("ExpiryDate")),
+        total=_decimal(data.get("TotalIncl")),
+        currency=_string(data.get("Currency")),
+        paid=bool(data.get("Paid", False)),
+        amount_to_pay=_decimal(data.get("ToPay")),
+        billit_status=_string(data.get("OrderStatus")),
+        overdue=bool(data.get("Overdue", False)),
+        days_overdue=_integer(data.get("DaysOverdue")),
+        approval_status=_string(data.get("ApprovalStatus")),
+        external_provider=_string(data.get("ExternalProvider")),
+        pdf=_file_reference(pdf_data) if isinstance(pdf_data, dict) else None,
+        attachment_count=attachment_count,
+    )
+
+
 def create_invoice_to_billit(invoice: CreateInvoiceInput) -> dict[str, Any]:
     customer: dict[str, Any] = {
         "Name": invoice.customer.name,
@@ -381,6 +490,43 @@ def _customer(data: dict[str, Any]) -> CustomerView:
         name=_string(data.get("Name")),
         vat_number=_string(data.get("VATNumber")),
         email=_string(data.get("Email")),
+        address=_address(selected) if selected else None,
+    )
+
+
+def _supplier(data: dict[str, Any]) -> SupplierView:
+    addresses = data.get("Addresses") or []
+    selected: dict[str, Any] | None = None
+    for address in addresses:
+        if isinstance(address, dict) and address.get("AddressType") == "InvoiceAddress":
+            selected = address
+            break
+    if selected is None and addresses and isinstance(addresses[0], dict):
+        selected = addresses[0]
+    if selected is None and any(
+        data.get(key) for key in ("Street", "StreetNumber", "Zipcode", "City", "CountryCode")
+    ):
+        selected = data
+
+    iban = _string(data.get("IBAN"))
+    bic = _string(data.get("BIC"))
+    bank_accounts = data.get("BankAccounts") or []
+    if isinstance(bank_accounts, list):
+        for account in bank_accounts:
+            if not isinstance(account, dict):
+                continue
+            iban = iban or _string(account.get("IBAN"))
+            bic = bic or _string(account.get("BIC"))
+            if iban and bic:
+                break
+
+    return SupplierView(
+        supplier_id=_integer(data.get("PartyID") or data.get("SupplierID")),
+        name=_string(data.get("DisplayName") or data.get("Name")),
+        vat_number=_string(data.get("VATNumber")),
+        email=_string(data.get("Email")),
+        iban=iban,
+        bic=bic,
         address=_address(selected) if selected else None,
     )
 
