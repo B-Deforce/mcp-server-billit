@@ -79,6 +79,7 @@ or dumping an MCP configuration file when they could expose credentials.
   It requires an explicit credit-note number and does not consume a Billit sequence.
 - Payment and delivery mutations apply only to the expected outgoing `Income` invoice or credit
   note type and are verified by a read after write.
+- `mark_invoice_sent` changes status only and must never call the send endpoint.
 - `mark_credit_note_sent` changes status only and must never call the send endpoint.
 - Peppol delivery requires a successful participant and document-specific capability preflight;
   an invoice capability does not authorize a credit-note send. It must never fall back to email.

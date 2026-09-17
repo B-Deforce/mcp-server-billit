@@ -23,6 +23,7 @@ from .models import (
     InvoiceDeliveryMethod,
     InvoiceReferenceSearchResult,
     InvoiceSendStatus,
+    InvoiceStatus,
     InvoiceView,
     PaymentMethod,
     PaymentStatus,
@@ -245,6 +246,20 @@ async def mark_invoice_paid(
         note=note,
         payment_method=payment_method,
     )
+
+
+@mcp.tool()
+async def mark_invoice_sent(
+    invoice_id: Annotated[int, Field(gt=0)],
+    ctx: Context[AppContext],
+) -> InvoiceStatus:
+    """Mark an existing outgoing sales invoice sent without delivering it.
+
+    This only sets Billit's IsSent status. It does not email the customer or transmit anything over
+    Peppol. An invoice marked sent will not later be sent by send_invoice, which protects against
+    accidental duplicate delivery.
+    """
+    return await ctx.request_context.lifespan_context.service.mark_invoice_sent(invoice_id)
 
 
 @mcp.tool()

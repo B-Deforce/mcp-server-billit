@@ -20,7 +20,7 @@ ChatGPT on the web does not read your local stdio configuration. It connects to 
 use [Secure MCP Tunnel](https://help.openai.com/en/articles/12584461) if you specifically need to
 bridge a locally running server to a supported ChatGPT workspace.
 
-It exposes seventeen tools:
+It exposes eighteen tools:
 
 - `get_invoice`: retrieve one invoice by Billit's `OrderID`
 - `find_invoices_by_payment_reference`: find outgoing invoices by an exact external/payment
@@ -31,6 +31,7 @@ It exposes seventeen tools:
 - `check_peppol_recipient`: check whether an invoice customer is registered and supports an
   invoice document type on Peppol
 - `mark_invoice_paid`: mark an outgoing sales invoice fully paid
+- `mark_invoice_sent`: update an invoice's sent status without delivering it
 - `create_invoice`: save a basic outgoing sales invoice without sending it
 - `send_invoice`: send one existing outgoing invoice by email or Peppol; Peppol is preflighted
 - `create_credit_note_from_invoice`: derive and save a full credit note from an existing outgoing
@@ -67,6 +68,8 @@ transports.
   `BILLIT_ALLOW_PRODUCTION_WRITES=true`.
 - `mark_invoice_paid` first verifies the order is an `Income` `Invoice`, returns without writing if
   it is already paid, and reads it back after the patch.
+- `mark_invoice_sent` only patches `IsSent=true`; it does not transmit the document. Once marked
+  sent, `send_invoice` will not deliver it later, which prevents accidental duplicates.
 - `create_invoice` sends Billit's `Idempotent-Key` header, never retries a write after an unknown
   outcome, and never calls Billit's send endpoint.
 - `create_credit_note_from_invoice` accepts only an outgoing sales invoice, derives a full credit
@@ -309,6 +312,18 @@ Mark an invoice paid:
   "note": "Matched bank transfer"
 }
 ```
+
+Mark an invoice as sent without transmitting it:
+
+```json
+{
+  "invoice_id": 1194146
+}
+```
+
+Use `mark_invoice_sent` only when the invoice was delivered outside Billit. It patches
+`IsSent=true`, verifies the saved state, and never calls Billit's send command. To actually deliver
+the invoice, use `send_invoice` instead.
 
 Create—but do not send—a basic invoice:
 

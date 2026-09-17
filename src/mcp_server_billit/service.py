@@ -18,6 +18,7 @@ from .mappers import (
     customer_invoice_search_from_billit,
     invoice_from_billit,
     invoice_send_status_from_billit,
+    invoice_status_from_billit,
     payment_status_from_billit,
     peppol_capability_from_billit,
     reference_search_from_billit,
@@ -36,6 +37,7 @@ from .models import (
     InvoiceDeliveryMethod,
     InvoiceReferenceSearchResult,
     InvoiceSendStatus,
+    InvoiceStatus,
     InvoiceView,
     PaymentMethod,
     PaymentStatus,
@@ -244,6 +246,22 @@ class BillitService:
                 "was not visible during verification. Check Billit before retrying."
             )
         return payment_status_from_billit(updated, already_paid=False)
+
+    async def mark_invoice_sent(self, invoice_id: int) -> InvoiceStatus:
+        self._ensure_write_allowed()
+        current = await self.client.get_invoice_raw(invoice_id)
+        self._ensure_outgoing_sales_invoice(current, invoice_id, operation="sent-status update")
+        if bool(current.get("IsSent", False)):
+            return invoice_status_from_billit(current, already_sent=True)
+
+        await self.client.mark_order_sent(invoice_id)
+        updated = await self.client.get_invoice_raw(invoice_id)
+        if not bool(updated.get("IsSent", False)):
+            raise BillitVerificationError(
+                f"Billit accepted the update for invoice {invoice_id}, but IsSent=true "
+                "was not visible during verification. Check Billit before retrying."
+            )
+        return invoice_status_from_billit(updated)
 
     async def create_invoice(
         self,
