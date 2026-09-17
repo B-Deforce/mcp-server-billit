@@ -22,6 +22,7 @@ async def test_server_advertises_only_the_intended_tools() -> None:
         "list_supplier_invoices",
         "list_unpaid_invoices",
         "mark_invoice_paid",
+        "mark_invoice_sent",
         "mark_credit_note_paid",
         "mark_credit_note_sent",
         "send_credit_note",
@@ -49,6 +50,10 @@ async def test_server_advertises_only_the_intended_tools() -> None:
 
     mark_sent = next(tool for tool in tools if tool.name == "mark_credit_note_sent")
     assert "does not email" in (mark_sent.description or "").lower()
+
+    mark_invoice_sent = next(tool for tool in tools if tool.name == "mark_invoice_sent")
+    assert "does not email" in (mark_invoice_sent.description or "").lower()
+    assert "without delivering" in (mark_invoice_sent.description or "").lower()
 
     send_credit = next(tool for tool in tools if tool.name == "send_credit_note")
     assert "external side effect" in (send_credit.description or "").lower()

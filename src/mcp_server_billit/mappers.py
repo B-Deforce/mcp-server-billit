@@ -20,6 +20,7 @@ from .models import (
     InvoiceReferenceMatch,
     InvoiceReferenceSearchResult,
     InvoiceSendStatus,
+    InvoiceStatus,
     InvoiceView,
     PaymentStatus,
     PeppolDocumentType,
@@ -73,6 +74,20 @@ def payment_status_from_billit(data: dict[str, Any], *, already_paid: bool) -> P
         paid_at=_datetime(data.get("PaidDate")),
         payment_method=_string(data.get("PaymentMethod")),
         already_paid=already_paid,
+    )
+
+
+def invoice_status_from_billit(
+    data: dict[str, Any],
+    *,
+    already_sent: bool = False,
+) -> InvoiceStatus:
+    return InvoiceStatus(
+        invoice_id=int(data["OrderID"]),
+        invoice_number=_string(data.get("OrderNumber")),
+        paid=bool(data.get("Paid", False)),
+        sent=bool(data.get("IsSent", False)),
+        already_sent=already_sent,
     )
 
 

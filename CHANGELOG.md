@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented here.
 
+## 0.6.0 - 2026-09-17
+
+- Add `mark_invoice_sent` to set `IsSent=true` on an outgoing sales invoice without email or
+  Peppol delivery.
+- Verify invoice type, direction, and the persisted sent state before returning success.
+
 ## 0.1.0 - 2026-09-03
 
 - Add async Billit client with typed, redacted errors and conservative GET retries.

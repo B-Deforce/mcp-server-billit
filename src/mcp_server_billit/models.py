@@ -200,6 +200,14 @@ class PaymentStatus(APIModel):
     already_paid: bool = False
 
 
+class InvoiceStatus(APIModel):
+    invoice_id: int
+    invoice_number: str | None = None
+    paid: bool
+    sent: bool
+    already_sent: bool = False
+
+
 class PeppolRecipientCapability(APIModel):
     invoice_id: int
     customer: str | None = None

@@ -190,6 +190,47 @@ async def test_already_paid_invoice_is_idempotent(invoice_payload: dict[str, Any
 
 
 @pytest.mark.asyncio
+async def test_mark_invoice_sent_only_updates_status(invoice_payload: dict[str, Any]) -> None:
+    client = FakeClient(invoice_payload)
+    service = BillitService(client)  # type: ignore[arg-type]
+
+    result = await service.mark_invoice_sent(1194146)
+
+    assert result.invoice_number == "QS-244SC"
+    assert result.sent is True
+    assert result.already_sent is False
+    assert client.patch_calls == 1
+    assert client.send_calls == []
+
+
+@pytest.mark.asyncio
+async def test_mark_invoice_sent_is_idempotent(invoice_payload: dict[str, Any]) -> None:
+    invoice_payload["IsSent"] = True
+    client = FakeClient(invoice_payload)
+    service = BillitService(client)  # type: ignore[arg-type]
+
+    result = await service.mark_invoice_sent(1194146)
+
+    assert result.sent is True
+    assert result.already_sent is True
+    assert client.patch_calls == 0
+    assert client.send_calls == []
+
+
+@pytest.mark.asyncio
+async def test_mark_invoice_sent_rejects_credit_note(invoice_payload: dict[str, Any]) -> None:
+    invoice_payload["OrderType"] = "CreditNote"
+    client = FakeClient(invoice_payload)
+    service = BillitService(client)  # type: ignore[arg-type]
+
+    with pytest.raises(BillitSafetyError, match="outgoing sales invoice"):
+        await service.mark_invoice_sent(1194146)
+
+    assert client.patch_calls == 0
+    assert client.send_calls == []
+
+
+@pytest.mark.asyncio
 async def test_find_by_payment_reference_is_read_only_and_compact(
     invoice_payload: dict[str, Any],
 ) -> None:
